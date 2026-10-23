@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseMoney, parseMoneyMicros, microsToString, parseCsv, normPeriod, detectDateOrder, normIsrc } from '../parse.js';
+import { parseMoney, parseMoneyMicros, microsToString, parseCsv, normPeriod, detectDateOrder, normIsrc, normTitle, titleSimilarity } from '../parse.js';
 
 test('parseMoney: sub-cent decimals are not read as whole numbers', () => {
   assert.equal(parseMoney('0.00456'), 0.00456);
@@ -78,4 +78,26 @@ test('normIsrc: 12 letters/digits, hyphens and spaces dropped, anything else is 
   assert.equal(normIsrc('USZZ1250000!'), null);
   assert.equal(normIsrc(null), null);
   assert.equal(normIsrc(''), null);
+});
+
+test('normTitle drops version and featured-artist tags but keeps other parentheticals', () => {
+  assert.equal(normTitle('Midnight Drive (Radio Edit)'), 'midnight drive');
+  assert.equal(normTitle('Midnight Drive - Remastered 2020'), 'midnight drive');
+  assert.equal(normTitle('Midnight Drive [Live at Rio]'), 'midnight drive');
+  assert.equal(normTitle('Midnight Drive (feat. Ana)'), 'midnight drive');
+  assert.equal(normTitle('Midnight Drive feat. Ana'), 'midnight drive');
+  assert.equal(normTitle('  Café   del  Mar  '), 'cafe del mar');
+  assert.equal(normTitle('Rock & Roll!'), 'rock and roll');
+  assert.equal(normTitle('Song (Part 2)'), 'song part 2', 'a part number is not a version tag');
+  assert.equal(normTitle('Live Forever'), 'live forever', 'a version word in the title itself is kept');
+  assert.equal(normTitle(null), '');
+});
+
+test('titleSimilarity: 1 for the same song, high for a typo, low for different songs', () => {
+  assert.equal(titleSimilarity('Midnight Drive', 'midnight drive (Radio Edit)'), 1);
+  assert.ok(titleSimilarity('Midnigth Drive', 'Midnight Drive') > 0.8);
+  assert.ok(titleSimilarity('Song (Part 1)', 'Song (Part 2)') < 1, 'different parts are not identical');
+  assert.ok(titleSimilarity('Midnight Drive', 'Summer Rain') < 0.4);
+  assert.equal(titleSimilarity('', 'Anything'), 0);
+  assert.equal(titleSimilarity('(Live)', 'Midnight Drive'), 0, 'nothing left after normalising');
 });

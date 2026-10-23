@@ -148,3 +148,39 @@ export const normIsrc = (s) => {
   const t = String(s ?? '').replace(/[-\s]/g, '').toUpperCase();
   return /^[A-Z0-9]{12}$/.test(t) ? t : null;
 };
+
+// ---------- title similarity (for suggesting songs; never used to assign automatically) ----------
+
+// Words that mark a different cut of the same song, not a different song.
+const VERSION_WORD = /\b(remix|mix|edit|version|live|remaster(?:ed)?|acoustic|instrumental|extended|mono|stereo|demo|original|radio|club|dub|vip|bonus|deluxe|explicit|clean)\b/;
+const FEATURING = /\b(feat|ft|featuring)\b\.?/;
+
+// Lower-cased, accent-free title with version and featured-artist tags removed, so
+// "Midnight Drive (Radio Edit)" and "Midnight Drive - Remastered 2020" both become "midnight drive".
+// A bracket or dash suffix that is not a version tag ("(Part 2)") is kept, so different songs stay different.
+export function normTitle(s) {
+  let t = String(s ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  t = t.replace(/\s*[([]([^)\]]*)[)\]]/g, (_, inner) => (VERSION_WORD.test(inner) || FEATURING.test(inner) ? ' ' : ` ${inner} `));
+  t = t.replace(/\s+-\s+(.*)$/, (m, tail) => (VERSION_WORD.test(tail) ? ' ' : m));
+  t = t.replace(/\s+(?:feat|ft|featuring)\b\.?\s+.*$/, ' ');
+  return t.replace(/&/g, ' and ').replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+const editDistance = (a, b) => {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+};
+
+// 0..1: 1 when the normalised titles are identical, otherwise 1 minus the edit distance as a share
+// of the longer title. 0 when either title is empty once normalised.
+export function titleSimilarity(a, b) {
+  const x = normTitle(a).slice(0, 200), y = normTitle(b).slice(0, 200);
+  if (!x || !y) return 0;
+  if (x === y) return 1;
+  return 1 - editDistance(x, y) / Math.max(x.length, y.length);
+}

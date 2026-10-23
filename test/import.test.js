@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestApp } from './helpers.js';
+import { suggestSongs } from '../import.js';
 
 const app = createTestApp();
 const { call } = app;
@@ -168,4 +169,26 @@ test('relinking refreshes the reason: stays, clears when matched, and resolves w
   const [row] = reasonOf('Shift Twin');
   assert.ok(row.song_id && row.song_id !== t1.id);
   assert.equal(row.match_reason, null);
+});
+
+// ---------- suggestions ----------
+
+test('suggestSongs ranks by score, applies the cut-off and the limit, and handles no title', () => {
+  const songs = [
+    { id: 1, title: 'Midnight Drive', isrc: null },
+    { id: 2, title: 'Midnight Drive (Radio Edit)', isrc: null },
+    { id: 3, title: 'Midnigth Drive', isrc: null },
+    { id: 4, title: 'Summer Rain', isrc: null },
+    { id: 5, title: 'Midnight Dive', isrc: null },
+  ];
+  const got = suggestSongs(songs, 'Midnight Drive - Remastered');
+  assert.deepEqual(got.map((s) => s.song_id), [1, 2, 5], 'exact normalised matches first, then the closest near-miss (one edit beats a transposition); limit is 3');
+  assert.equal(got[0].score, 1);
+  assert.ok(got[2].score < 1 && got[2].score >= 0.8);
+  assert.deepEqual(suggestSongs(songs, 'Midnight Drive', { limit: 4 }).map((s) => s.song_id), [1, 2, 5, 3], 'the transposed typo is next');
+  assert.ok(!suggestSongs(songs, 'Midnight Drive', { limit: 10 }).some((s) => s.song_id === 4), 'an unrelated title is below the cut-off');
+  assert.deepEqual(suggestSongs(songs, 'Totally Different'), []);
+  assert.deepEqual(suggestSongs(songs, null), []);
+  assert.deepEqual(suggestSongs(songs, 'Midnight Drive', { limit: 1 }).length, 1);
+  assert.equal(suggestSongs(songs, 'Midnight Drive', { min: 1 }).every((s) => s.score === 1), true);
 });
