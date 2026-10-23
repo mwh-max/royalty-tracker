@@ -216,3 +216,40 @@ test('rows left unmatched by a deleted song are reported as none', async () => {
   const row = (await call('GET', '/api/unmatched')).data.find((u) => u.raw_title === 'Why Gone');
   assert.equal(row.reason, 'none');
 });
+
+// ---------- split types ----------
+
+test('splits default to master; composition splits are saved and replaced independently', async () => {
+  const { data: a } = await call('POST', '/api/contributors', { name: 'Typed A' });
+  const { data: b } = await call('POST', '/api/contributors', { name: 'Typed B' });
+  const { data: song } = await call('POST', '/api/songs', { title: 'Typed Splits' });
+  const get = async () => (await call('GET', '/api/songs')).data.find((x) => x.id === song.id);
+
+  const m = await call('PUT', `/api/songs/${song.id}/splits`, { splits: [{ contributor_id: a.id, pct: 100 }] });
+  assert.equal(m.data.type, 'master', 'no type means master, as before');
+  const c = await call('PUT', `/api/songs/${song.id}/splits`, { type: 'composition', splits: [{ contributor_id: a.id, pct: 40 }, { contributor_id: b.id, pct: 60 }] });
+  assert.equal(c.status, 200);
+  assert.equal(c.data.type, 'composition');
+
+  let s = await get();
+  assert.deepEqual(s.splits.map((x) => [x.contributor_id, x.pct]), [[a.id, 100]], 'master untouched by the composition save');
+  assert.equal(s.compositionSplitTotal, 100);
+
+  await call('PUT', `/api/songs/${song.id}/splits`, { type: 'composition', splits: [{ contributor_id: b.id, pct: 100 }] });
+  await call('PUT', `/api/songs/${song.id}/splits`, { splits: [] });
+  s = await get();
+  assert.deepEqual(s.splits, [], 'clearing master leaves composition alone');
+  assert.deepEqual(s.compositionSplits.map((x) => [x.contributor_id, x.pct]), [[b.id, 100]]);
+});
+
+test('split types are validated per type', async () => {
+  const { data: a } = await call('POST', '/api/contributors', { name: 'Typed C' });
+  const { data: song } = await call('POST', '/api/songs', { title: 'Typed Rules' });
+  const put = (body) => call('PUT', `/api/songs/${song.id}/splits`, body);
+
+  assert.equal((await put({ type: 'publishing', splits: [] })).status, 400);
+  assert.equal((await put({ type: 'composition', splits: [{ contributor_id: a.id, pct: 60 }, { contributor_id: a.id, pct: 20 }] })).status, 400, 'twice within one type');
+  assert.equal((await put({ type: 'composition', splits: [{ contributor_id: a.id, pct: 101 }] })).status, 400, 'over 100% within one type');
+  await put({ splits: [{ contributor_id: a.id, pct: 100 }] });
+  assert.equal((await put({ type: 'composition', splits: [{ contributor_id: a.id, pct: 100 }] })).status, 200, 'the same contributor may hold both kinds, each up to 100%');
+});

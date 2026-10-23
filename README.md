@@ -9,7 +9,7 @@ npm test
 
 The UI (`public/`) is plain HTML/JS with no build step. Data is stored in `royalties.db` next to `server.js`. Money is stored as integer micro-dollars (1e-6 USD), so sums are exact and per-stream amounts like `0.00456` survive; statement amounts with more than six decimals are rounded to six. The API still uses decimal dollars. Databases from earlier versions are converted automatically on first start, so copy `royalties.db` somewhere first if it holds real data. Try `sample-statement.csv` on the Statements page.
 
-- **Catalog & splits**: songs (title/ISRC), contributors, per-song split percentages (capped at 100%).
+- **Catalog & splits**: songs (title/ISRC), contributors, per-song split percentages (capped at 100%). Splits come in two kinds: master (the recording; these drive payouts) and composition (the song; stored for MLC registration and not used in payouts).
 - **Statement import**: CSV with auto-detected columns; rows match songs by ISRC then title (a title or ISRC shared by several songs is left unmatched for you to assign); unmatched rows can be assigned or auto-link when you add the song, and the Statements page says whether nothing matched or several songs did.
 - **Dashboard**: earnings by period, track, platform, territory; date filter; CSV export.
 - **Payments**: expected vs. received (pending/overdue/short), advances with recoupment against same-named sources.
