@@ -95,12 +95,13 @@ export function createRoutes(db) {
   route('POST', '/api/statements/import', ({ body }) => importStatement(db, body));
   route('DELETE', '/api/statements/:id', ({ params }) => { runOne('Statement', 'DELETE FROM statements WHERE id=?', params.id); return { ok: true }; });
   route('GET', '/api/unmatched', () => all(`
-    SELECT COALESCE(raw_title, raw_isrc, 'Unknown') name, raw_title, raw_isrc, COUNT(*) rows, SUM(amount_micros) total
+    SELECT COALESCE(raw_title, raw_isrc, 'Unknown') name, raw_title, raw_isrc, COUNT(*) rows, SUM(amount_micros) total,
+           CASE WHEN SUM(match_reason = 'ambiguous') > 0 THEN 'ambiguous' ELSE 'none' END reason
     FROM earnings WHERE song_id IS NULL GROUP BY raw_title, raw_isrc ORDER BY total DESC`).map((u) => ({ ...u, total: usd(u.total) })));
   route('POST', '/api/unmatched/assign', ({ body }) => {
     const sid = requireNum(body.song_id, 'song_id');
     if (!get('SELECT 1 FROM songs WHERE id=?', sid)) throw notFound('Song');
-    const r = run(`UPDATE earnings SET song_id = ? WHERE song_id IS NULL AND COALESCE(raw_title,'') = ? AND COALESCE(raw_isrc,'') = ?`,
+    const r = run(`UPDATE earnings SET song_id = ?, match_reason = NULL WHERE song_id IS NULL AND COALESCE(raw_title,'') = ? AND COALESCE(raw_isrc,'') = ?`,
       sid, body.raw_title || '', body.raw_isrc || '');
     return { updated: Number(r.changes) };
   });

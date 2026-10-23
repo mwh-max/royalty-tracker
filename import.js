@@ -49,8 +49,8 @@ export function importStatement(db, { source, filename, csv, force, dateOrder })
   const id = tx(db, () => {
     const st = run(db, 'INSERT INTO statements (source, filename, content_hash) VALUES (?, ?, ?)', source, filename || null, hash);
     const sid = Number(st.lastInsertRowid);
-    const ins = db.prepare(`INSERT INTO earnings (statement_id, song_id, raw_title, raw_isrc, platform, territory, period, units, amount_micros)
-                            VALUES (?,?,?,?,?,?,?,?,?)`);
+    const ins = db.prepare(`INSERT INTO earnings (statement_id, song_id, raw_title, raw_isrc, platform, territory, period, units, amount_micros, match_reason)
+                            VALUES (?,?,?,?,?,?,?,?,?,?)`);
     for (const r of rows.slice(1)) {
       const amount = parseMoneyMicros(r[map.amount]);
       if (!Number.isFinite(amount)) { skipped++; continue; }
@@ -65,7 +65,7 @@ export function importStatement(db, { source, filename, csv, force, dateOrder })
         map.platform != null ? str(r[map.platform]) : null,
         map.territory != null ? str(r[map.territory]) : null,
         map.period != null ? normPeriod(r[map.period], order) : null,
-        units, amount);
+        units, amount, songId ? null : hit.ambiguous ? 'ambiguous' : 'none');
     }
     const count = get(db, 'SELECT COUNT(*) c FROM earnings WHERE statement_id = ?', sid).c;
     run(db, 'UPDATE statements SET row_count = ? WHERE id = ?', count, sid);
@@ -75,12 +75,16 @@ export function importStatement(db, { source, filename, csv, force, dateOrder })
   return { id, imported: total.c, matched, unmatched: total.c - matched, ambiguous, skipped, total: usd(total.t) };
 }
 
+// Links unmatched earnings to songs that now match, and refreshes match_reason on the ones that still
+// don't. Returns the number of rows linked.
 export function relink(db) {
   let n = 0;
   const rows = all(db, 'SELECT DISTINCT raw_title, raw_isrc FROM earnings WHERE song_id IS NULL');
   for (const r of rows) {
-    const id = matchSong(db, r.raw_title, r.raw_isrc);
-    if (id) n += Number(run(db, `UPDATE earnings SET song_id=? WHERE song_id IS NULL AND raw_title IS ? AND raw_isrc IS ?`, id, r.raw_title, r.raw_isrc).changes);
+    const hit = {};
+    const id = matchSong(db, r.raw_title, r.raw_isrc, hit);
+    if (id) n += Number(run(db, `UPDATE earnings SET song_id=?, match_reason=NULL WHERE song_id IS NULL AND raw_title IS ? AND raw_isrc IS ?`, id, r.raw_title, r.raw_isrc).changes);
+    else run(db, `UPDATE earnings SET match_reason=? WHERE song_id IS NULL AND raw_title IS ? AND raw_isrc IS ?`, hit.ambiguous ? 'ambiguous' : 'none', r.raw_title, r.raw_isrc);
   }
   return n;
 }
