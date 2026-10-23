@@ -368,3 +368,32 @@ test('a large import keeps a multibyte character that straddles two body chunks 
   assert.equal(titles.length, 8000);
   assert.deepEqual(titles.filter((t) => t.includes('\uFFFD')), [], 'no title was corrupted at the chunk boundary');
 });
+
+// ---------- payment notes ----------
+
+const paymentWithNotes = async (notes) => (await call('POST', '/api/payments', { source: 'NotesSrc', expected_amount: 10, notes })).data.id;
+const notesOf = async (id) => (await call('GET', '/api/payments')).data.find((x) => x.id === id).notes;
+
+test('payment update with notes: null clears the notes', async () => {
+  const id = await paymentWithNotes('chase on Friday');
+  assert.equal((await call('PUT', `/api/payments/${id}`, { notes: null })).status, 200);
+  assert.equal(await notesOf(id), null);
+});
+
+test('payment update with notes: "" clears the notes', async () => {
+  const id = await paymentWithNotes('chase on Friday');
+  assert.equal((await call('PUT', `/api/payments/${id}`, { notes: '' })).status, 200);
+  assert.equal(await notesOf(id), null);
+});
+
+test('payment update without a notes key leaves the notes unchanged', async () => {
+  const id = await paymentWithNotes('chase on Friday');
+  await call('PUT', `/api/payments/${id}`, { received_amount: 10, received_date: '2025-03-01' }); // what "Record received" sends
+  assert.equal(await notesOf(id), 'chase on Friday');
+});
+
+test('payment update with new notes text replaces the notes', async () => {
+  const id = await paymentWithNotes('chase on Friday');
+  await call('PUT', `/api/payments/${id}`, { notes: 'paid by bank transfer' });
+  assert.equal(await notesOf(id), 'paid by bank transfer');
+});

@@ -124,12 +124,12 @@ export function createRoutes(db) {
   route('PUT', '/api/payments/:id', ({ params, body }) => {
     const cur = get('SELECT * FROM payments WHERE id=?', params.id);
     if (!cur) throw notFound('Payment');
-    // only fields present in the body change; an explicit null clears received_*
+    // only fields present in the body change; an explicit null (or "" for notes) clears received_* and notes
     const has = (k) => Object.hasOwn(body, k);
     run('UPDATE payments SET received_micros=?, received_date=?, notes=? WHERE id=?',
       has('received_amount') ? (num(body.received_amount) == null ? null : toMicros(num(body.received_amount))) : cur.received_micros,
       has('received_date') ? str(body.received_date) : cur.received_date,
-      str(body.notes) ?? cur.notes, params.id);
+      has('notes') ? str(body.notes) : cur.notes, params.id);
     return { ok: true };
   });
   route('DELETE', '/api/payments/:id', ({ params }) => { runOne('Payment', 'DELETE FROM payments WHERE id=?', params.id); return { ok: true }; });
