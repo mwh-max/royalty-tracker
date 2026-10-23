@@ -59,6 +59,9 @@ const tx = (fn) => {
 };
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 const bad = (msg) => new HttpError(400, msg);
+const notFound = (what) => new HttpError(404, `${what} not found`);
+// run() on an UPDATE/DELETE by id; 404 when no row matched
+const runOne = (what, sql, ...p) => { const r = run(sql, ...p); if (!Number(r.changes)) throw notFound(what); return r; };
 
 // databases created before duplicate detection lack content_hash
 if (!all('PRAGMA table_info(statements)').some((c) => c.name === 'content_hash')) {
@@ -380,12 +383,13 @@ route('POST', '/api/songs', ({ body }) => {
   return { id, linked };
 });
 route('PUT', '/api/songs/:id', ({ params, body }) => {
-  run('UPDATE songs SET title=?, isrc=?, release=?, notes=? WHERE id=?',
+  runOne('Song', 'UPDATE songs SET title=?, isrc=?, release=?, notes=? WHERE id=?',
     requireStr(body.title, 'title'), str(body.isrc), str(body.release), str(body.notes), params.id);
   return { linked: relink() };
 });
-route('DELETE', '/api/songs/:id', ({ params }) => { run('DELETE FROM songs WHERE id=?', params.id); return { ok: true }; });
+route('DELETE', '/api/songs/:id', ({ params }) => { runOne('Song', 'DELETE FROM songs WHERE id=?', params.id); return { ok: true }; });
 route('PUT', '/api/songs/:id/splits', ({ params, body }) => {
+  if (!get('SELECT 1 FROM songs WHERE id=?', params.id)) throw notFound('Song');
   const list = Array.isArray(body.splits) ? body.splits : [];
   const total = list.reduce((a, s) => a + requireNum(s.pct, 'pct'), 0);
   if (total > 100.0001) throw bad(`Splits total ${total}%, which exceeds 100%`);
@@ -403,7 +407,7 @@ route('GET', '/api/contributors', () => all('SELECT * FROM contributors ORDER BY
 route('POST', '/api/contributors', ({ body }) => ({
   id: Number(run('INSERT INTO contributors (name, email) VALUES (?,?)', requireStr(body.name, 'name'), str(body.email)).lastInsertRowid),
 }));
-route('DELETE', '/api/contributors/:id', ({ params }) => { run('DELETE FROM contributors WHERE id=?', params.id); return { ok: true }; });
+route('DELETE', '/api/contributors/:id', ({ params }) => { runOne('Contributor', 'DELETE FROM contributors WHERE id=?', params.id); return { ok: true }; });
 route('GET', '/api/payouts', () => payouts());
 
 route('GET', '/api/statements', () => all(`
@@ -412,12 +416,13 @@ route('GET', '/api/statements', () => all(`
   FROM statements st LEFT JOIN earnings e ON e.statement_id = st.id
   GROUP BY st.id ORDER BY st.id DESC`));
 route('POST', '/api/statements/import', ({ body }) => importStatement(body));
-route('DELETE', '/api/statements/:id', ({ params }) => { run('DELETE FROM statements WHERE id=?', params.id); return { ok: true }; });
+route('DELETE', '/api/statements/:id', ({ params }) => { runOne('Statement', 'DELETE FROM statements WHERE id=?', params.id); return { ok: true }; });
 route('GET', '/api/unmatched', () => all(`
   SELECT COALESCE(raw_title, raw_isrc, 'Unknown') name, raw_title, raw_isrc, COUNT(*) rows, SUM(amount) total
   FROM earnings WHERE song_id IS NULL GROUP BY raw_title, raw_isrc ORDER BY total DESC`));
 route('POST', '/api/unmatched/assign', ({ body }) => {
   const sid = requireNum(body.song_id, 'song_id');
+  if (!get('SELECT 1 FROM songs WHERE id=?', sid)) throw notFound('Song');
   const r = run(`UPDATE earnings SET song_id = ? WHERE song_id IS NULL AND COALESCE(raw_title,'') = ? AND COALESCE(raw_isrc,'') = ?`,
     sid, body.raw_title || '', body.raw_isrc || '');
   return { updated: Number(r.changes) };
@@ -432,7 +437,7 @@ route('POST', '/api/payments', ({ body }) => {
 });
 route('PUT', '/api/payments/:id', ({ params, body }) => {
   const cur = get('SELECT * FROM payments WHERE id=?', params.id);
-  if (!cur) throw new HttpError(404, 'Payment not found');
+  if (!cur) throw notFound('Payment');
   // only fields present in the body change; an explicit null clears received_*
   const has = (k) => Object.hasOwn(body, k);
   run('UPDATE payments SET received_amount=?, received_date=?, notes=? WHERE id=?',
@@ -441,14 +446,14 @@ route('PUT', '/api/payments/:id', ({ params, body }) => {
     str(body.notes) ?? cur.notes, params.id);
   return { ok: true };
 });
-route('DELETE', '/api/payments/:id', ({ params }) => { run('DELETE FROM payments WHERE id=?', params.id); return { ok: true }; });
+route('DELETE', '/api/payments/:id', ({ params }) => { runOne('Payment', 'DELETE FROM payments WHERE id=?', params.id); return { ok: true }; });
 
 route('GET', '/api/advances', () => advances());
 route('POST', '/api/advances', ({ body }) => ({
   id: Number(run('INSERT INTO advances (source, amount, date, notes) VALUES (?,?,?,?)',
     requireStr(body.source, 'source'), requireNum(body.amount, 'amount'), str(body.date), str(body.notes)).lastInsertRowid),
 }));
-route('DELETE', '/api/advances/:id', ({ params }) => { run('DELETE FROM advances WHERE id=?', params.id); return { ok: true }; });
+route('DELETE', '/api/advances/:id', ({ params }) => { runOne('Advance', 'DELETE FROM advances WHERE id=?', params.id); return { ok: true }; });
 
 route('GET', '/api/export/earnings.csv', () => {
   const rows = all(`SELECT COALESCE(s.title, e.raw_title) title, e.raw_isrc isrc, e.platform, e.territory, e.period, e.units, e.amount, st.source

@@ -324,3 +324,48 @@ test('export neutralises spreadsheet formulas but leaves numbers alone', async (
   assert.equal(byTitle['Plain, with comma'][2], 'Ok', 'ordinary text is untouched');
   for (const r of mine) for (const cell of r) assert.ok(!/^[=+\-@]/.test(cell) || /^-?\d/.test(cell), `live formula: ${cell}`);
 });
+
+// ---------- missing ids ----------
+
+test('PUT/DELETE on a missing id returns 404', async () => {
+  const body = { title: 'x', name: 'x', source: 'x' };
+  const cases = [
+    ['PUT', '/api/songs/987654', body],
+    ['DELETE', '/api/songs/987654'],
+    ['PUT', '/api/songs/987654/splits', { splits: [] }],
+    ['DELETE', '/api/contributors/987654'],
+    ['DELETE', '/api/statements/987654'],
+    ['DELETE', '/api/payments/987654'],
+    ['DELETE', '/api/advances/987654'],
+    ['PUT', '/api/payments/987654', { notes: 'x' }],
+    ['POST', '/api/unmatched/assign', { song_id: 987654, raw_title: 'x' }],
+  ];
+  for (const [m, p, b] of cases) {
+    const r = await call(m, p, b);
+    assert.equal(r.status, 404, `${m} ${p}`);
+    assert.match(r.data.error, /not found/i);
+  }
+});
+
+test('PUT/DELETE on existing ids still succeed, and a second DELETE is 404', async () => {
+  const { data: song } = await call('POST', '/api/songs', { title: 'Exists' });
+  assert.equal((await call('PUT', `/api/songs/${song.id}`, { title: 'Exists 2' })).status, 200);
+  assert.equal((await call('PUT', `/api/songs/${song.id}/splits`, { splits: [] })).status, 200);
+
+  const { data: c } = await call('POST', '/api/contributors', { name: 'Gone' });
+  assert.equal((await call('DELETE', `/api/contributors/${c.id}`)).status, 200);
+  assert.equal((await call('DELETE', `/api/contributors/${c.id}`)).status, 404);
+
+  assert.equal((await call('DELETE', `/api/songs/${song.id}`)).status, 200);
+  assert.equal((await call('DELETE', `/api/songs/${song.id}`)).status, 404);
+
+  const { data: a } = await call('POST', '/api/advances', { source: 'DelSrc', amount: 1 });
+  assert.equal((await call('DELETE', `/api/advances/${a.id}`)).status, 200);
+  const { data: p } = await call('POST', '/api/payments', { source: 'DelSrc', expected_amount: 1 });
+  assert.equal((await call('DELETE', `/api/payments/${p.id}`)).status, 200);
+});
+
+test('editing a song with no field changes still succeeds', async () => {
+  const { data: song } = await call('POST', '/api/songs', { title: 'Same' });
+  assert.equal((await call('PUT', `/api/songs/${song.id}`, { title: 'Same' })).status, 200);
+});
