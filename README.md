@@ -11,6 +11,7 @@ The UI (`public/`) is plain HTML/JS with no build step. Data is stored in `royal
 
 - **Catalog & splits**: songs (title/ISRC), contributors, per-song split percentages (capped at 100%). Splits come in two kinds: master (the recording; these drive payouts) and composition (the song; stored for MLC registration and not used in payouts).
 - **Statement import**: CSV with auto-detected columns; rows match songs by ISRC then title (a title or ISRC shared by several songs is left unmatched for you to assign); unmatched rows can be assigned or auto-link when you add the song, and the Statements page says whether nothing matched or several songs did.
+- **MLC bulk match**: store an MLC Song Code on each registered song and download a CSV in the MLC's bulk-match format (`ISRC`, `MLC Song Code`) from the Catalog page. The MLC's own unmatched-recordings list is only visible in its member portal, so this prepares the file you upload there; it does not fetch or detect MLC-unmatched recordings.
 - **Dashboard**: earnings by period, track, platform, territory; date filter; CSV export.
 - **Payments**: expected vs. received (pending/overdue/short), advances with recoupment against same-named sources.
 - **Payouts**: each contributor's gross share of earnings from their splits, plus any earnings not covered by splits or not matched to a song (`/api/payouts/summary`). Payments to contributors aren't tracked, so nothing is netted.
