@@ -253,3 +253,22 @@ test('split types are validated per type', async () => {
   await put({ splits: [{ contributor_id: a.id, pct: 100 }] });
   assert.equal((await put({ type: 'composition', splits: [{ contributor_id: a.id, pct: 100 }] })).status, 200, 'the same contributor may hold both kinds, each up to 100%');
 });
+
+// ---------- composition readiness ----------
+
+test('/api/composition/readiness reports each song and updates as splits change', async () => {
+  const { data: a } = await call('POST', '/api/contributors', { name: 'Route Ready' });
+  const { data: song } = await call('POST', '/api/songs', { title: 'Route Readiness Song' });
+  const find = async () => (await call('GET', '/api/composition/readiness')).data.songs.find((s) => s.song_id === song.id);
+
+  assert.equal((await find()).status, 'missing');
+  await call('PUT', `/api/songs/${song.id}/splits`, { type: 'composition', splits: [{ contributor_id: a.id, pct: 40 }] });
+  const short = await find();
+  assert.equal(short.status, 'short');
+  assert.equal(short.total, 40);
+  await call('PUT', `/api/songs/${song.id}/splits`, { type: 'composition', splits: [{ contributor_id: a.id, pct: 100 }] });
+  assert.equal((await find()).status, 'ready');
+
+  const all = (await call('GET', '/api/composition/readiness')).data;
+  assert.ok(all.ready >= 1 && all.total >= all.ready);
+});
