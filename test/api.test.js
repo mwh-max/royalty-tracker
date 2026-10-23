@@ -299,3 +299,28 @@ test('dashboard: payments and advances follow the date filter', async () => {
   assert.ok(none.payments.exp >= 147, 'unfiltered includes undated payments');
   assert.ok(none.advances >= 811);
 });
+
+// ---------- CSV export ----------
+
+test('export neutralises spreadsheet formulas but leaves numbers alone', async () => {
+  const csv = [
+    'Track,ISRC,Store,Earnings,Sale Month',
+    '"=HYPERLINK(""http://evil.example"")",,+cmd,-3.50,2033-01',
+    '@SUM(1+1),,-store,2.00,2033-01',
+    '"Plain, with comma",,Ok,1.00,2033-01',
+  ].join('\n');
+  await call('POST', '/api/statements/import', { source: '=src', csv });
+  const rows = parseCsv(await fetch(base + '/api/export/earnings.csv').then((r) => r.text()));
+  const mine = rows.filter((r) => r[4] === '2033-01');
+  assert.equal(mine.length, 3);
+  const byTitle = Object.fromEntries(mine.map((r) => [r[0], r]));
+
+  const link = byTitle[`'=HYPERLINK("http://evil.example")`];
+  assert.ok(link, 'title is prefixed with a quote');
+  assert.equal(link[2], "'+cmd");
+  assert.equal(link[6], '-3.5', 'negative amount stays numeric');
+  assert.equal(link[7], "'=src", 'source is neutralised too');
+  assert.equal(byTitle["'@SUM(1+1)"][2], "'-store");
+  assert.equal(byTitle['Plain, with comma'][2], 'Ok', 'ordinary text is untouched');
+  for (const r of mine) for (const cell of r) assert.ok(!/^[=+\-@]/.test(cell) || /^-?\d/.test(cell), `live formula: ${cell}`);
+});

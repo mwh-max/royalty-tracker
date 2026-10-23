@@ -454,7 +454,14 @@ route('GET', '/api/export/earnings.csv', () => {
   const rows = all(`SELECT COALESCE(s.title, e.raw_title) title, e.raw_isrc isrc, e.platform, e.territory, e.period, e.units, e.amount, st.source
                     FROM earnings e JOIN statements st ON st.id = e.statement_id LEFT JOIN songs s ON s.id = e.song_id
                     ORDER BY e.period, title`);
-  const esc = (v) => (v == null ? '' : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+  // Text starting with = + - @ (or tab/CR) is executed as a formula by Excel/Sheets, and titles, sources etc.
+  // come from imported files, so prefix a quote to keep them inert. Numbers (incl. negatives) are left alone.
+  const esc = (v) => {
+    if (v == null) return '';
+    let t = String(v);
+    if (typeof v === 'string' && /^[=+\-@\t\r]/.test(t)) t = `'${t}`;
+    return /[",\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+  };
   const head = 'title,isrc,platform,territory,period,units,amount,source';
   return { __csv: [head, ...rows.map((r) => [r.title, r.isrc, r.platform, r.territory, r.period, r.units, r.amount, r.source].map(esc).join(','))].join('\n') };
 });
