@@ -17,8 +17,9 @@ const json = (res, status, body) => {
 };
 
 const readBody = (req) => new Promise((resolve, reject) => {
-  let data = '';
-  req.on('data', (c) => { data += c; if (data.length > 25e6) { reject(new HttpError(413, 'Body too large')); req.destroy(); } });
+  let data = '', bytes = 0;
+  req.setEncoding('utf8'); // decodes across chunk boundaries, so a multibyte character split between chunks survives
+  req.on('data', (c) => { data += c; bytes += Buffer.byteLength(c); if (bytes > 25e6) { reject(new HttpError(413, 'Body too large')); req.destroy(); } });
   req.on('end', () => {
     if (!data) return resolve({});
     try { resolve(JSON.parse(data)); } catch { reject(bad('Invalid JSON')); }
