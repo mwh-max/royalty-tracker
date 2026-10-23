@@ -4,14 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { openDb } from './db.js';
 import { createServer } from './routes.js';
 
-export { parseCsv, parseMoney, parseMoneyMicros, microsToString, detectDateOrder, normPeriod } from './parse.js';
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
-const db = openDb(process.env.DB_FILE || path.join(__dirname, 'royalties.db'));
 
-export const server = createServer(db);
-
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Opens the database and starts listening. Importing this module does neither.
+export function start() {
+  const db = openDb(process.env.DB_FILE || path.join(__dirname, 'royalties.db'));
+  const server = createServer(db);
   server.listen(PORT, '127.0.0.1', () => console.log(`Royalty Tracker running at http://localhost:${PORT}`));
+  return server;
 }
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) start();
