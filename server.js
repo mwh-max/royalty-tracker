@@ -262,7 +262,10 @@ function songsWithStats() {
 
 function dashboard(q) {
   const from = q.get('from') || '0000-00', to = q.get('to') || '9999-99';
-  const where = `WHERE (e.period IS NULL OR (e.period >= ? AND e.period <= ?))`;
+  // With a date filter, earnings of unknown period can't be placed in the range, so they drop out
+  // (reported separately as `undated`); with no filter they're all included.
+  const filtered = q.has('from') || q.has('to');
+  const where = filtered ? `WHERE e.period >= ? AND e.period <= ?` : `WHERE ? IS NOT NULL AND ? IS NOT NULL`;
   const args = [from, to];
   const total = get(`SELECT COALESCE(SUM(amount),0) t, COALESCE(SUM(units),0) u FROM earnings e ${where}`, ...args);
   const byPeriod = all(`SELECT COALESCE(period,'unknown') k, SUM(amount) v FROM earnings e ${where} GROUP BY period ORDER BY period`, ...args);
@@ -271,10 +274,11 @@ function dashboard(q) {
   const byTrack = all(`SELECT COALESCE(s.title, e.raw_title, 'Unknown') k, e.song_id, SUM(e.amount) v, SUM(e.units) u
                        FROM earnings e LEFT JOIN songs s ON s.id = e.song_id ${where}
                        GROUP BY COALESCE(e.song_id, 'raw:' || e.raw_title) ORDER BY v DESC LIMIT 15`, ...args);
-  const unmatched = get(`SELECT COUNT(*) c, COALESCE(SUM(amount),0) t FROM earnings WHERE song_id IS NULL`);
+  const unmatched = get(`SELECT COUNT(*) c, COALESCE(SUM(amount),0) t FROM earnings e ${where} AND e.song_id IS NULL`, ...args);
+  const undated = get(`SELECT COUNT(*) c, COALESCE(SUM(amount),0) t FROM earnings WHERE period IS NULL`);
   const pay = get(`SELECT COALESCE(SUM(expected_amount),0) exp, COALESCE(SUM(received_amount),0) rec FROM payments`);
   const adv = get(`SELECT COALESCE(SUM(amount),0) t FROM advances`);
-  return { total: total.t, units: total.u, byPeriod, byPlatform, byTerritory, byTrack, unmatched,
+  return { total: total.t, units: total.u, byPeriod, byPlatform, byTerritory, byTrack, unmatched, undated,
            payments: pay, advances: adv.t };
 }
 

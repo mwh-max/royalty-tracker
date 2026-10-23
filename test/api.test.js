@@ -248,3 +248,30 @@ test('import rejects a dateOrder that contradicts the file, and invalid values',
   const bad = await call('POST', '/api/statements/import', { source: 'ConSrc', csv, dateOrder: 'ymd' });
   assert.equal(bad.status, 400);
 });
+
+// ---------- dashboard filtering ----------
+
+const dash = async (qs = '') => (await call('GET', `/api/dashboard${qs}`)).data;
+
+test('dashboard: earnings filter excludes undated rows and unmatched respects the range', async () => {
+  const csvA = 'Track,Earnings,Sale Month\nDashA,10.00,2031-01\nDashB,20.00,2031-02\nDashNoPeriod,5.00,\n';
+  await call('POST', '/api/statements/import', { source: 'DashSrc', csv: csvA });
+
+  const all = await dash();
+  const jan = await dash('?from=2031-01&to=2031-01');
+  const feb = await dash('?from=2031-02&to=2031-02');
+  assert.equal(jan.total, 10);
+  assert.equal(feb.total, 20);
+  assert.equal(jan.byPeriod.length, 1);
+  assert.ok(all.byPeriod.some((p) => p.k === 'unknown'), 'undated rows are visible when unfiltered');
+  assert.ok(!jan.byPeriod.some((p) => p.k === 'unknown'));
+  assert.equal(jan.undated.t, 5, 'excluded undated earnings are reported, not hidden');
+  assert.equal(jan.unmatched.t, 10, 'unmatched follows the filter');
+  assert.equal(feb.unmatched.t, 20);
+});
+
+test('dashboard: open-ended filters work', async () => {
+  assert.equal((await dash('?from=2031-02')).total, 20);
+  const upToJan = (await dash('?to=2031-01')).total, upToDec = (await dash('?to=2030-12')).total;
+  assert.ok(Math.abs(upToJan - upToDec - 10) < 1e-9);
+});
