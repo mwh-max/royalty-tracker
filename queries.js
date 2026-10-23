@@ -139,7 +139,7 @@ export function payments(db) {
 // The MLC's bulk-match upload pairs a recording (ISRC) with a registered work (MLC Song Code).
 // Songs with an MLC code that can't be used are returned in `skipped` with the reason; songs without a
 // code aren't listed, since they simply aren't registered yet.
-const MLC_CODE = /^[^\s,"'=+\-@]\S*$/; // no whitespace, comma or quote; can't start like a spreadsheet formula
+const MLC_CODE = /^[^\s,"'=+\-@][^\s,"']*$/; // no whitespace, comma or quote anywhere; can't start like a spreadsheet formula
 
 export function mlcBulkMatch(db) {
   const rows = [], skipped = [];
