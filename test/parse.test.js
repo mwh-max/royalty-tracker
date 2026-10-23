@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseMoney, parseMoneyMicros, microsToString, parseCsv, normPeriod, detectDateOrder } from '../parse.js';
+import { parseMoney, parseMoneyMicros, microsToString, parseCsv, normPeriod, detectDateOrder, normIsrc } from '../parse.js';
 
 test('parseMoney: sub-cent decimals are not read as whole numbers', () => {
   assert.equal(parseMoney('0.00456'), 0.00456);
@@ -68,4 +68,14 @@ test('microsToString has no float artefacts', () => {
   assert.equal(microsToString(-3500000), '-3.5');
   assert.equal(microsToString(0), '0');
   assert.equal(microsToString(1), '0.000001');
+});
+
+test('normIsrc: 12 letters/digits, hyphens and spaces dropped, anything else is null', () => {
+  assert.equal(normIsrc('US-ZZ1-25-00001'), 'USZZ12500001');
+  assert.equal(normIsrc(' uszz12500001 '), 'USZZ12500001');
+  assert.equal(normIsrc('USZZ1250000'), null, 'too short');
+  assert.equal(normIsrc('USZZ125000012'), null, 'too long');
+  assert.equal(normIsrc('USZZ1250000!'), null);
+  assert.equal(normIsrc(null), null);
+  assert.equal(normIsrc(''), null);
 });
