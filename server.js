@@ -276,10 +276,17 @@ function dashboard(q) {
                        GROUP BY COALESCE(e.song_id, 'raw:' || e.raw_title) ORDER BY v DESC LIMIT 15`, ...args);
   const unmatched = get(`SELECT COUNT(*) c, COALESCE(SUM(amount),0) t FROM earnings e ${where} AND e.song_id IS NULL`, ...args);
   const undated = get(`SELECT COUNT(*) c, COALESCE(SUM(amount),0) t FROM earnings WHERE period IS NULL`);
-  const pay = get(`SELECT COALESCE(SUM(expected_amount),0) exp, COALESCE(SUM(received_amount),0) rec FROM payments`);
-  const adv = get(`SELECT COALESCE(SUM(amount),0) t FROM advances`);
+  // payments and advances are dated YYYY-MM-DD; filter on the month, and (as with earnings) leave out
+  // undated ones when a filter is active, counting them instead of hiding them.
+  const payDate = `substr(COALESCE(received_date, expected_date),1,7)`;
+  const payWhere = filtered ? `WHERE ${payDate} >= ? AND ${payDate} <= ?` : `WHERE ? IS NOT NULL AND ? IS NOT NULL`;
+  const pay = get(`SELECT COALESCE(SUM(expected_amount),0) exp, COALESCE(SUM(received_amount),0) rec FROM payments ${payWhere}`, ...args);
+  const undatedPayments = get(`SELECT COUNT(*) c FROM payments WHERE COALESCE(received_date, expected_date) IS NULL`).c;
+  const advWhere = filtered ? `WHERE substr(date,1,7) >= ? AND substr(date,1,7) <= ?` : `WHERE ? IS NOT NULL AND ? IS NOT NULL`;
+  const adv = get(`SELECT COALESCE(SUM(amount),0) t FROM advances ${advWhere}`, ...args);
+  const undatedAdvances = get(`SELECT COUNT(*) c FROM advances WHERE date IS NULL`).c;
   return { total: total.t, units: total.u, byPeriod, byPlatform, byTerritory, byTrack, unmatched, undated,
-           payments: pay, advances: adv.t };
+           payments: pay, advances: adv.t, undatedPayments, undatedAdvances };
 }
 
 function payouts() {

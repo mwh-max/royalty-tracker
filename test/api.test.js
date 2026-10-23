@@ -275,3 +275,27 @@ test('dashboard: open-ended filters work', async () => {
   const upToJan = (await dash('?to=2031-01')).total, upToDec = (await dash('?to=2030-12')).total;
   assert.ok(Math.abs(upToJan - upToDec - 10) < 1e-9);
 });
+
+test('dashboard: payments and advances follow the date filter', async () => {
+  await call('POST', '/api/payments', { source: 'FPay', expected_amount: 100, expected_date: '2032-01-15', received_amount: 90, received_date: '2032-02-03' });
+  await call('POST', '/api/payments', { source: 'FPay', expected_amount: 40, expected_date: '2032-03-10' });
+  await call('POST', '/api/payments', { source: 'FPay', expected_amount: 7 });
+  await call('POST', '/api/advances', { source: 'FAdv', amount: 500, date: '2032-01-01' });
+  await call('POST', '/api/advances', { source: 'FAdv', amount: 300, date: '2032-04-01' });
+  await call('POST', '/api/advances', { source: 'FAdv', amount: 11 });
+
+  const feb = await dash('?from=2032-02&to=2032-02'); // received 2032-02 counts under February
+  assert.equal(feb.payments.exp, 100);
+  assert.equal(feb.payments.rec, 90);
+  assert.equal(feb.advances, 0);
+
+  const q1 = await dash('?from=2032-01&to=2032-03');
+  assert.equal(q1.payments.exp, 140);
+  assert.equal(q1.advances, 500);
+  assert.equal(q1.undatedPayments, 1);
+  assert.equal(q1.undatedAdvances, 1);
+
+  const none = await dash();
+  assert.ok(none.payments.exp >= 147, 'unfiltered includes undated payments');
+  assert.ok(none.advances >= 811);
+});
