@@ -1,7 +1,6 @@
 // Database: schema, migrations and thin query helpers. Nothing opens on import; call openDb().
 import { DatabaseSync } from 'node:sqlite';
-
-const MICROS = 1_000_000;
+import { MICROS } from './parse.js';
 
 const SCHEMA = `
 PRAGMA foreign_keys = ON;
