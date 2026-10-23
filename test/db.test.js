@@ -74,3 +74,21 @@ test('a database with dollar REAL columns is migrated to integer micros', async 
   assert.equal(check.prepare("SELECT count(*) c FROM sqlite_master WHERE name = 'idx_earn_song'").get().c, 1, 'index recreated');
   check.close();
 });
+
+test('a database without mlc_song_code gains the column and keeps its songs', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt-mlc-'));
+  const file = path.join(dir, 'prev.db');
+  const prev = new DatabaseSync(file);
+  prev.exec(`
+    CREATE TABLE songs (id INTEGER PRIMARY KEY, title TEXT NOT NULL, isrc TEXT, release TEXT, notes TEXT);
+    INSERT INTO songs (title, isrc) VALUES ('Kept Song', 'USZZ12500001');
+  `);
+  prev.close();
+
+  for (let i = 0; i < 2; i++) { // second open proves the migration is idempotent
+    const db = openDb(file);
+    const row = db.prepare('SELECT title, isrc, mlc_song_code FROM songs').get();
+    assert.deepEqual({ ...row }, { title: 'Kept Song', isrc: 'USZZ12500001', mlc_song_code: null });
+    db.close();
+  }
+});
