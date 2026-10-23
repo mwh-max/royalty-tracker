@@ -4,114 +4,28 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
+import * as sql from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
-const db = new DatabaseSync(process.env.DB_FILE || path.join(__dirname, 'royalties.db'));
+const db = sql.openDb(process.env.DB_FILE || path.join(__dirname, 'royalties.db'));
 
-db.exec(`
-PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS songs (
-  id INTEGER PRIMARY KEY, title TEXT NOT NULL, isrc TEXT, release TEXT, notes TEXT
-);
-CREATE TABLE IF NOT EXISTS contributors (
-  id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT
-);
-CREATE TABLE IF NOT EXISTS splits (
-  song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
-  contributor_id INTEGER NOT NULL REFERENCES contributors(id) ON DELETE CASCADE,
-  pct REAL NOT NULL,
-  PRIMARY KEY (song_id, contributor_id)
-);
-CREATE TABLE IF NOT EXISTS statements (
-  id INTEGER PRIMARY KEY, source TEXT NOT NULL, filename TEXT,
-  imported_at TEXT NOT NULL DEFAULT (datetime('now')), row_count INTEGER DEFAULT 0,
-  content_hash TEXT
-);
-CREATE TABLE IF NOT EXISTS earnings (
-  id INTEGER PRIMARY KEY,
-  statement_id INTEGER NOT NULL REFERENCES statements(id) ON DELETE CASCADE,
-  song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL,
-  raw_title TEXT, raw_isrc TEXT, platform TEXT, territory TEXT,
-  period TEXT, units INTEGER DEFAULT 0, amount_micros INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS payments (
-  id INTEGER PRIMARY KEY, source TEXT NOT NULL,
-  expected_micros INTEGER, expected_date TEXT,
-  received_micros INTEGER, received_date TEXT, notes TEXT
-);
-CREATE TABLE IF NOT EXISTS advances (
-  id INTEGER PRIMARY KEY, source TEXT NOT NULL, amount_micros INTEGER NOT NULL,
-  date TEXT, notes TEXT
-);
-`);
 // Money is stored as integer micro-dollars (1e-6 USD) so sums are exact and sub-cent per-stream
 // amounts survive; the API still speaks decimal dollars. Floats only appear when converting at the edges.
 const MICROS = 1_000_000;
 const usd = (m) => (m == null ? null : m / MICROS);
 
 // ---------- helpers ----------
-const all = (sql, ...p) => db.prepare(sql).all(...p);
-const get = (sql, ...p) => db.prepare(sql).get(...p);
-const run = (sql, ...p) => db.prepare(sql).run(...p);
-const tx = (fn) => {
-  db.exec('BEGIN');
-  try { const r = fn(); db.exec('COMMIT'); return r; }
-  catch (e) { db.exec('ROLLBACK'); throw e; }
-};
+const all = (q, ...p) => sql.all(db, q, ...p);
+const get = (q, ...p) => sql.get(db, q, ...p);
+const run = (q, ...p) => sql.run(db, q, ...p);
+const tx = (fn) => sql.tx(db, fn);
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 const bad = (msg) => new HttpError(400, msg);
 const notFound = (what) => new HttpError(404, `${what} not found`);
 // run() on an UPDATE/DELETE by id; 404 when no row matched
 const runOne = (what, sql, ...p) => { const r = run(sql, ...p); if (!Number(r.changes)) throw notFound(what); return r; };
 
-// databases created before duplicate detection lack content_hash
-if (!all('PRAGMA table_info(statements)').some((c) => c.name === 'content_hash')) {
-  db.exec('ALTER TABLE statements ADD COLUMN content_hash TEXT');
-}
-
-// Older databases stored dollars as REAL (earnings.amount, payments.*_amount, advances.amount);
-// rebuild those tables with integer micro-dollars.
-const hasCol = (table, col) => all(`PRAGMA table_info(${table})`).some((c) => c.name === col);
-if (hasCol('earnings', 'amount') || hasCol('payments', 'expected_amount') || hasCol('advances', 'amount')) {
-  const toMicro = (col) => `CAST(ROUND(${col} * ${MICROS}) AS INTEGER)`;
-  tx(() => {
-    if (hasCol('earnings', 'amount')) {
-      db.exec(`ALTER TABLE earnings RENAME TO earnings_old;
-        CREATE TABLE earnings (
-          id INTEGER PRIMARY KEY,
-          statement_id INTEGER NOT NULL REFERENCES statements(id) ON DELETE CASCADE,
-          song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL,
-          raw_title TEXT, raw_isrc TEXT, platform TEXT, territory TEXT,
-          period TEXT, units INTEGER DEFAULT 0, amount_micros INTEGER NOT NULL
-        );
-        INSERT INTO earnings SELECT id, statement_id, song_id, raw_title, raw_isrc, platform, territory, period, units, ${toMicro('amount')} FROM earnings_old;
-        DROP TABLE earnings_old;`);
-    }
-    if (hasCol('payments', 'expected_amount')) {
-      db.exec(`ALTER TABLE payments RENAME TO payments_old;
-        CREATE TABLE payments (
-          id INTEGER PRIMARY KEY, source TEXT NOT NULL,
-          expected_micros INTEGER, expected_date TEXT,
-          received_micros INTEGER, received_date TEXT, notes TEXT
-        );
-        INSERT INTO payments SELECT id, source, ${toMicro('expected_amount')}, expected_date, ${toMicro('received_amount')}, received_date, notes FROM payments_old;
-        DROP TABLE payments_old;`);
-    }
-    if (hasCol('advances', 'amount')) {
-      db.exec(`ALTER TABLE advances RENAME TO advances_old;
-        CREATE TABLE advances (
-          id INTEGER PRIMARY KEY, source TEXT NOT NULL, amount_micros INTEGER NOT NULL,
-          date TEXT, notes TEXT
-        );
-        INSERT INTO advances SELECT id, source, ${toMicro('amount')}, date, notes FROM advances_old;
-        DROP TABLE advances_old;`);
-    }
-  });
-}
-db.exec(`CREATE INDEX IF NOT EXISTS idx_earn_song ON earnings(song_id);
-CREATE INDEX IF NOT EXISTS idx_earn_period ON earnings(period);`);
 
 const num = (v) => {
   if (v == null || v === '') return null;
