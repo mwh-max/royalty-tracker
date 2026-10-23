@@ -137,17 +137,23 @@ const pages = {
       actions(btn('Delete', confirmed('Delete this statement and its earnings?', act(() => api('DELETE', `/statements/${s.id}`))), 'link danger'))));
     const urows = unmatched.map((u) => {
       const sel = h('select', null, h('option', { value: '' }, 'Assign to…'), songs.map((s) => h('option', { value: s.id }, s.title)));
-      return h('tr', null, td(u.name), td(u.raw_isrc || ''), td(u.reason === 'ambiguous' ? 'Several songs match' : 'No song matches'), td(int(u.rows), true), td(money(u.total), true), actions(sel,
+      const assignTo = async (songId) => {
+        const r = await api('POST', '/unmatched/assign', { song_id: songId, raw_title: u.raw_title, raw_isrc: u.raw_isrc });
+        say(`Assigned ${r.updated} rows.`);
+      };
+      // suggestions only: each is a button, so nothing is linked until it is clicked
+      const suggested = h('td', null, u.suggestions.map((s) =>
+        btn(`${s.title} (${Math.round(s.score * 100)}%)`, act(() => assignTo(s.song_id)), 'link')));
+      return h('tr', null, td(u.name), td(u.raw_isrc || ''), td(u.reason === 'ambiguous' ? 'Several songs match' : 'No song matches'), suggested, td(int(u.rows), true), td(money(u.total), true), actions(sel,
         btn('Assign', act(async () => {
           if (!sel.value) throw new Error('Pick a song first');
-          const r = await api('POST', '/unmatched/assign', { song_id: Number(sel.value), raw_title: u.raw_title, raw_isrc: u.raw_isrc });
-          say(`Assigned ${r.updated} rows.`);
+          await assignTo(Number(sel.value));
         }))));
     });
     return [h('h2', null, 'Import statement'), form,
       table(['Source', 'File', 'Imported', 'Rows#', 'Total#', '', ''], srows, 'No statements imported.'),
       h('h2', null, 'Unmatched earnings'),
-      table(['Track', 'ISRC', 'Why', 'Rows#', 'Total#', ''], urows, 'Everything is matched.')];
+      table(['Track', 'ISRC', 'Why', 'Likely songs', 'Rows#', 'Total#', ''], urows, 'Everything is matched.')];
   },
 
   async payments() {
