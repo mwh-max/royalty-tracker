@@ -185,15 +185,20 @@ export const normPeriod = (s, order = 'mdy') => {
   return s;
 };
 
-function matchSong(title, isrc) {
+// Returns the song id for a title/ISRC pair, or null. A key shared by several songs is ambiguous:
+// guessing would put earnings on the wrong song, so it falls through (ISRC, then title) and is left
+// unmatched for the user to assign. `ambiguous` is set on the result when that happened.
+function matchSong(title, isrc, out = {}) {
+  const pick = (rows) => {
+    if (rows.length === 1) return rows[0].id;
+    if (rows.length > 1) out.ambiguous = true;
+    return null;
+  };
   if (isrc) {
-    const s = get(`SELECT id FROM songs WHERE upper(replace(isrc,'-','')) = ?`,isrc.toUpperCase().replace(/-/g, ''));
-    if (s) return s.id;
+    const id = pick(all(`SELECT id FROM songs WHERE upper(replace(isrc,'-','')) = ?`, isrc.toUpperCase().replace(/-/g, '')));
+    if (id) return id;
   }
-  if (title) {
-    const s = get('SELECT id FROM songs WHERE lower(trim(title)) = ?', title.trim().toLowerCase());
-    if (s) return s.id;
-  }
+  if (title) return pick(all('SELECT id FROM songs WHERE lower(trim(title)) = ?', title.trim().toLowerCase()));
   return null;
 }
 
@@ -221,7 +226,7 @@ function importStatement({ source, filename, csv, force, dateOrder }) {
   if (dupe && !force) {
     throw new HttpError(409, `This statement was already imported as #${dupe.id} on ${dupe.imported_at}. Delete it first, or re-import with force to add it again.`);
   }
-  let skipped = 0, matched = 0;
+  let skipped = 0, matched = 0, ambiguous = 0;
   const id = tx(() => {
     const st = run('INSERT INTO statements (source, filename, content_hash) VALUES (?, ?, ?)', source, filename || null, hash);
     const sid = Number(st.lastInsertRowid);
@@ -232,8 +237,10 @@ function importStatement({ source, filename, csv, force, dateOrder }) {
       if (!Number.isFinite(amount)) { skipped++; continue; }
       const title = map.title != null ? str(r[map.title]) : null;
       const isrc = map.isrc != null ? str(r[map.isrc]) : null;
-      const songId = matchSong(title, isrc);
+      const hit = {};
+      const songId = matchSong(title, isrc, hit);
       if (songId) matched++;
+      else if (hit.ambiguous) ambiguous++;
       const units = map.units != null ? Math.round(parseMoney(r[map.units]) || 0) : 0;
       ins.run(sid, songId, title, isrc,
         map.platform != null ? str(r[map.platform]) : null,
@@ -246,7 +253,7 @@ function importStatement({ source, filename, csv, force, dateOrder }) {
     return sid;
   });
   const total = get('SELECT COUNT(*) c, COALESCE(SUM(amount),0) t FROM earnings WHERE statement_id = ?', id);
-  return { id, imported: total.c, matched, unmatched: total.c - matched, skipped, total: total.t };
+  return { id, imported: total.c, matched, unmatched: total.c - matched, ambiguous, skipped, total: total.t };
 }
 
 // ---------- domain queries ----------

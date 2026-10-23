@@ -369,3 +369,50 @@ test('editing a song with no field changes still succeeds', async () => {
   const { data: song } = await call('POST', '/api/songs', { title: 'Same' });
   assert.equal((await call('PUT', `/api/songs/${song.id}`, { title: 'Same' })).status, 200);
 });
+
+// ---------- ambiguous song matching ----------
+
+test('statement rows whose title matches several songs are left unmatched, not guessed', async () => {
+  await call('POST', '/api/songs', { title: 'Twin' });
+  await call('POST', '/api/songs', { title: 'twin ' });
+  await call('POST', '/api/songs', { title: 'Solo Match' });
+  const csv = 'Track,Earnings,Sale Month\nTwin,10.00,2034-01\nSolo Match,5.00,2034-01\n';
+  const r = await call('POST', '/api/statements/import', { source: 'TwinSrc', csv });
+  assert.equal(r.data.matched, 1);
+  assert.equal(r.data.ambiguous, 1);
+  assert.equal(r.data.unmatched, 1);
+});
+
+test('an ISRC settles a duplicate title; a shared ISRC is ambiguous', async () => {
+  const { data: a } = await call('POST', '/api/songs', { title: 'Dup Title', isrc: 'USZZ12500001' });
+  await call('POST', '/api/songs', { title: 'Dup Title', isrc: 'USZZ12500002' });
+  const r = await call('POST', '/api/statements/import', {
+    source: 'IsrcSrc', csv: 'Track,ISRC,Earnings,Sale Month\nDup Title,US-ZZ1-25-00001,3.00,2034-02\n',
+  });
+  assert.equal(r.data.matched, 1);
+  const songs = (await call('GET', '/api/songs')).data;
+  assert.equal(songs.find((s) => s.id === a.id).earned, 3);
+
+  await call('POST', '/api/songs', { title: 'Shared A', isrc: 'USZZ12500009' });
+  await call('POST', '/api/songs', { title: 'Shared B', isrc: 'USZZ12500009' });
+  const r2 = await call('POST', '/api/statements/import', {
+    source: 'IsrcSrc2', csv: 'ISRC,Earnings,Sale Month\nUSZZ12500009,1.00,2034-02\n',
+  });
+  assert.equal(r2.data.matched, 0);
+  assert.equal(r2.data.ambiguous, 1);
+});
+
+test('relinking skips ambiguous titles, and manual assign still works', async () => {
+  const { data: one } = await call('POST', '/api/songs', { title: 'Late Twin' });
+  const { data: two } = await call('POST', '/api/songs', { title: 'Late Twin' });
+  await call('POST', '/api/statements/import', { source: 'LateSrc', csv: 'Track,Earnings,Sale Month\nLate Twin,8.00,2034-03\n' });
+  const { data: other } = await call('POST', '/api/songs', { title: 'Unrelated' });
+  assert.equal(other.linked, 0, 'adding a song triggers relink, which must not guess');
+  const um = (await call('GET', '/api/unmatched')).data.find((u) => u.raw_title === 'Late Twin');
+  assert.ok(um);
+  const asg = await call('POST', '/api/unmatched/assign', { song_id: two.id, raw_title: um.raw_title, raw_isrc: um.raw_isrc });
+  assert.equal(asg.data.updated, 1);
+  const songs = (await call('GET', '/api/songs')).data;
+  assert.equal(songs.find((s) => s.id === two.id).earned, 8);
+  assert.equal(songs.find((s) => s.id === one.id).earned, 0);
+});
