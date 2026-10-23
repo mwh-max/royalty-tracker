@@ -290,6 +290,42 @@ test('MLC bulk-match preview and CSV download', async () => {
   assert.match(earnings.headers.get('content-disposition'), /filename="earnings\.csv"/);
 });
 
+// ---------- suggestions on unmatched groups ----------
+
+test('/api/unmatched suggests likely songs and never assigns them', async () => {
+  const { data: drive } = await call('POST', '/api/songs', { title: 'Sugg Midnight Drive' });
+  await call('POST', '/api/songs', { title: 'Sugg Summer Rain' });
+  const { data: twinA } = await call('POST', '/api/songs', { title: 'Sugg Twin' });
+  const { data: twinB } = await call('POST', '/api/songs', { title: 'Sugg Twin' });
+  const csv = [
+    'Track,Earnings,Sale Month',
+    'Sugg Midnight Drive (Radio Edit),5.00,2043-01', // version tag: exact after normalising
+    'Sugg Midnigth Drive,4.00,2043-01', // typo
+    'Sugg Twin,3.00,2043-01', // matches two songs exactly: ambiguous
+    'Sugg Unrelated Thing,2.00,2043-01',
+  ].join('\n');
+  await call('POST', '/api/statements/import', { source: 'SuggSrc', csv });
+
+  const list = (await call('GET', '/api/unmatched')).data;
+  const by = (title) => list.find((u) => u.raw_title === title);
+
+  const edit = by('Sugg Midnight Drive (Radio Edit)');
+  assert.equal(edit.suggestions[0].song_id, drive.id);
+  assert.equal(edit.suggestions[0].score, 1);
+  assert.equal(by('Sugg Midnigth Drive').suggestions[0].song_id, drive.id);
+  assert.ok(by('Sugg Midnigth Drive').suggestions[0].score < 1);
+
+  const twin = by('Sugg Twin');
+  assert.equal(twin.reason, 'ambiguous');
+  assert.deepEqual(twin.suggestions.map((s) => s.song_id).sort((a, b) => a - b), [twinA.id, twinB.id].sort((a, b) => a - b), 'both candidates offered');
+
+  assert.deepEqual(by('Sugg Unrelated Thing').suggestions, []);
+  assert.ok(list.every((u) => Array.isArray(u.suggestions)), 'every group carries the field');
+
+  // suggesting is read-only: the rows are still unmatched
+  assert.equal(app.db.prepare("SELECT count(*) c FROM earnings WHERE raw_title LIKE 'Sugg %' AND song_id IS NOT NULL").get().c, 0);
+});
+
 // ---------- composition readiness ----------
 
 test('/api/composition/readiness reports each song and updates as splits change', async () => {

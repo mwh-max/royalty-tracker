@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { all as dbAll, get as dbGet, run as dbRun, tx as dbTx } from './db.js';
 import { HttpError, bad, notFound } from './errors.js';
 import { usd, num, str, microsToString, toMicros } from './parse.js';
-import { importStatement, relink } from './import.js';
+import { importStatement, relink, suggestSongs } from './import.js';
 import { songsWithStats, compositionReadiness, dashboard, payouts, payoutSummary, advances, payments, mlcBulkMatch, mlcBulkMatchCsv } from './queries.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
@@ -97,10 +97,14 @@ export function createRoutes(db) {
     GROUP BY st.id ORDER BY st.id DESC`).map((st) => ({ ...st, total: usd(st.total) })));
   route('POST', '/api/statements/import', ({ body }) => importStatement(db, body));
   route('DELETE', '/api/statements/:id', ({ params }) => { runOne('Statement', 'DELETE FROM statements WHERE id=?', params.id); return { ok: true }; });
-  route('GET', '/api/unmatched', () => all(`
-    SELECT COALESCE(raw_title, raw_isrc, 'Unknown') name, raw_title, raw_isrc, COUNT(*) rows, SUM(amount_micros) total,
-           CASE WHEN SUM(match_reason = 'ambiguous') > 0 THEN 'ambiguous' ELSE 'none' END reason
-    FROM earnings WHERE song_id IS NULL GROUP BY raw_title, raw_isrc ORDER BY total DESC`).map((u) => ({ ...u, total: usd(u.total) })));
+  route('GET', '/api/unmatched', () => {
+    const songs = all('SELECT id, title, isrc FROM songs');
+    return all(`
+      SELECT COALESCE(raw_title, raw_isrc, 'Unknown') name, raw_title, raw_isrc, COUNT(*) rows, SUM(amount_micros) total,
+             CASE WHEN SUM(match_reason = 'ambiguous') > 0 THEN 'ambiguous' ELSE 'none' END reason
+      FROM earnings WHERE song_id IS NULL GROUP BY raw_title, raw_isrc ORDER BY total DESC`)
+      .map((u) => ({ ...u, total: usd(u.total), suggestions: suggestSongs(songs, u.raw_title) }));
+  });
   route('POST', '/api/unmatched/assign', ({ body }) => {
     const sid = requireNum(body.song_id, 'song_id');
     if (!get('SELECT 1 FROM songs WHERE id=?', sid)) throw notFound('Song');
