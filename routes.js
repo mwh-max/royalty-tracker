@@ -7,7 +7,7 @@ import { all as dbAll, get as dbGet, run as dbRun, tx as dbTx } from './db.js';
 import { HttpError, bad, notFound } from './errors.js';
 import { usd, num, str, microsToString, toMicros } from './parse.js';
 import { importStatement, relink } from './import.js';
-import { songsWithStats, dashboard, payouts, payoutSummary, advances, payments } from './queries.js';
+import { songsWithStats, dashboard, payouts, payoutSummary, advances, payments, mlcBulkMatch, mlcBulkMatchCsv } from './queries.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 
@@ -43,16 +43,18 @@ export function createRoutes(db) {
   route('GET', '/api/dashboard', ({ url }) => dashboard(db, url.searchParams));
   route('GET', '/api/songs', () => songsWithStats(db));
   route('POST', '/api/songs', ({ body }) => {
-    const r = run('INSERT INTO songs (title, isrc, release, notes) VALUES (?,?,?,?)',
-      requireStr(body.title, 'title'), str(body.isrc), str(body.release), str(body.notes));
+    const r = run('INSERT INTO songs (title, isrc, release, notes, mlc_song_code) VALUES (?,?,?,?,?)',
+      requireStr(body.title, 'title'), str(body.isrc), str(body.release), str(body.notes), str(body.mlc_song_code));
     const id = Number(r.lastInsertRowid);
     // link any previously unmatched earnings
     const linked = relink(db);
     return { id, linked };
   });
   route('PUT', '/api/songs/:id', ({ params, body }) => {
-    runOne('Song', 'UPDATE songs SET title=?, isrc=?, release=?, notes=? WHERE id=?',
-      requireStr(body.title, 'title'), str(body.isrc), str(body.release), str(body.notes), params.id);
+    // mlc_song_code only changes when sent (null clears it), so clients that predate it don't wipe it
+    runOne('Song', 'UPDATE songs SET title=?, isrc=?, release=?, notes=?, mlc_song_code = CASE WHEN ? THEN ? ELSE mlc_song_code END WHERE id=?',
+      requireStr(body.title, 'title'), str(body.isrc), str(body.release), str(body.notes),
+      Object.hasOwn(body, 'mlc_song_code') ? 1 : 0, str(body.mlc_song_code), params.id);
     return { linked: relink(db) };
   });
   route('DELETE', '/api/songs/:id', ({ params }) => { runOne('Song', 'DELETE FROM songs WHERE id=?', params.id); return { ok: true }; });
@@ -129,6 +131,14 @@ export function createRoutes(db) {
   }));
   route('DELETE', '/api/advances/:id', ({ params }) => { runOne('Advance', 'DELETE FROM advances WHERE id=?', params.id); return { ok: true }; });
 
+  route('GET', '/api/mlc/bulk-match', () => {
+    const { rows, skipped } = mlcBulkMatch(db);
+    return { ready: rows.length, skipped };
+  });
+  route('GET', '/api/export/mlc-bulk-match.csv', () => ({
+    __csv: mlcBulkMatchCsv(mlcBulkMatch(db).rows), __filename: 'mlc-bulk-match.csv', __type: 'text/csv; charset=utf-8',
+  }));
+
   route('GET', '/api/export/earnings.csv', () => {
     const rows = all(`SELECT COALESCE(s.title, e.raw_title) title, e.raw_isrc isrc, e.platform, e.territory, e.period, e.units, e.amount_micros, st.source
                       FROM earnings e JOIN statements st ON st.id = e.statement_id LEFT JOIN songs s ON s.id = e.song_id
@@ -180,7 +190,7 @@ export function createServer(db) {
           const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody(req);
           const out = r.fn({ params: m.groups || {}, body, url });
           if (out && out.__csv != null) {
-            res.writeHead(200, { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment; filename="earnings.csv"' });
+            res.writeHead(200, { 'Content-Type': out.__type || 'text/csv', 'Content-Disposition': `attachment; filename="${out.__filename || 'earnings.csv'}"` });
             return res.end(out.__csv);
           }
           return json(res, 200, out);
