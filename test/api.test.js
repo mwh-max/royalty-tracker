@@ -445,3 +445,29 @@ test('payout summary reports unallocated earnings instead of dropping them', asy
   // every dollar is either owed to someone or reported as unallocated
   assert.ok(Math.abs(data.owed + data.unallocated - data.total) < 1e-6, `${data.owed} + ${data.unallocated} != ${data.total}`);
 });
+
+// ---------- static UI ----------
+
+test('serves the UI files', async () => {
+  for (const [path, type] of [['/', 'text/html'], ['/app.js', 'text/javascript'], ['/style.css', 'text/css']]) {
+    const res = await fetch(base + path);
+    assert.equal(res.status, 200, path);
+    assert.equal(res.headers.get('content-type'), type);
+    await res.text();
+  }
+  assert.equal((await fetch(base + '/nope.js')).status, 404);
+});
+
+test('static serving cannot escape public/', async () => {
+  for (const path of ['/../server.js', '/..%2fserver.js', '/%2e%2e/server.js', '/../package.json', '/public/../../server.js']) {
+    const r = await raw('GET', path);
+    assert.ok(r.status === 404 || r.status === 400, `${path} -> ${r.status}`);
+    assert.ok(!r.body.includes('DatabaseSync'), `${path} leaked source`);
+  }
+});
+
+test('UI never builds HTML from API data', async () => {
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(src), 'use textContent/DOM nodes, not HTML strings');
+});

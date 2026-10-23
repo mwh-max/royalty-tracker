@@ -7,13 +7,13 @@ npm start     # http://localhost:3000
 npm test
 ```
 
-Data is stored in `royalties.db` next to `server.js`. Try `sample-statement.csv` on the Statements page.
+The UI (`public/`) is plain HTML/JS with no build step. Data is stored in `royalties.db` next to `server.js`. Try `sample-statement.csv` on the Statements page.
 
 - **Catalog & splits**: songs (title/ISRC), contributors, per-song split percentages (capped at 100%).
-- **Statement import**: CSV with auto-detected columns; rows match songs by ISRC then title; unmatched rows can be assigned or auto-link when you add the song.
+- **Statement import**: CSV with auto-detected columns; rows match songs by ISRC then title (a title or ISRC shared by several songs is left unmatched for you to assign); unmatched rows can be assigned or auto-link when you add the song.
 - **Dashboard**: earnings by period, track, platform, territory; date filter; CSV export.
 - **Payments**: expected vs. received (pending/overdue/short), advances with recoupment against same-named sources.
-- **Payouts**: each contributor's share of earnings from their splits.
+- **Payouts**: each contributor's gross share of earnings from their splits, plus any earnings not covered by splits or not matched to a song (`/api/payouts/summary`). Payments to contributors aren't tracked, so nothing is netted.
 
 ## API notes
 
