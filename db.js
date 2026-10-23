@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS earnings (
   statement_id INTEGER NOT NULL REFERENCES statements(id) ON DELETE CASCADE,
   song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL,
   raw_title TEXT, raw_isrc TEXT, platform TEXT, territory TEXT,
-  period TEXT, units INTEGER DEFAULT 0, amount_micros INTEGER NOT NULL
+  period TEXT, units INTEGER DEFAULT 0, amount_micros INTEGER NOT NULL,
+  match_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS payments (
   id INTEGER PRIMARY KEY, source TEXT NOT NULL,
@@ -93,6 +94,11 @@ function migrate(db) {
           DROP TABLE advances_old;`);
       }
     });
+  }
+  // why an earnings row has no song: 'none' (nothing matched) or 'ambiguous' (several songs matched);
+  // NULL on matched rows. Added after the micros rebuild above, which recreates earnings without it.
+  if (!hasCol(db, 'earnings', 'match_reason')) {
+    db.exec('ALTER TABLE earnings ADD COLUMN match_reason TEXT');
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_earn_song ON earnings(song_id);
 CREATE INDEX IF NOT EXISTS idx_earn_period ON earnings(period);`);
