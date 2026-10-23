@@ -471,3 +471,28 @@ test('UI never builds HTML from API data', async () => {
   const src = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(src), 'use textContent/DOM nodes, not HTML strings');
 });
+
+// ---------- split validation ----------
+
+test('splits naming a nonexistent contributor return 404 and change nothing', async () => {
+  const { data: c } = await call('POST', '/api/contributors', { name: 'Real Split' });
+  const { data: song } = await call('POST', '/api/songs', { title: 'Split Guard' });
+  await call('PUT', `/api/songs/${song.id}/splits`, { splits: [{ contributor_id: c.id, pct: 50 }] });
+
+  const r = await call('PUT', `/api/songs/${song.id}/splits`, {
+    splits: [{ contributor_id: c.id, pct: 30 }, { contributor_id: 987654, pct: 20 }],
+  });
+  assert.equal(r.status, 404);
+  assert.match(r.data.error, /Contributor 987654 not found/);
+
+  const s = (await call('GET', '/api/songs')).data.find((x) => x.id === song.id);
+  assert.deepEqual(s.splits.map((x) => [x.contributor_id, x.pct]), [[c.id, 50]], 'existing splits untouched');
+});
+
+test('malformed split entries are 400s, not 409s or 500s', async () => {
+  const { data: song } = await call('POST', '/api/songs', { title: 'Split Shapes' });
+  for (const splits of [[null], ['x'], [{ pct: 10 }], [{ contributor_id: 'abc', pct: 10 }], [{ contributor_id: 1.5, pct: 10 }]]) {
+    const r = await call('PUT', `/api/songs/${song.id}/splits`, { splits });
+    assert.equal(r.status, 400, JSON.stringify(splits));
+  }
+});

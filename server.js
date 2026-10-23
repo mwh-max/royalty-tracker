@@ -412,6 +412,11 @@ route('DELETE', '/api/songs/:id', ({ params }) => { runOne('Song', 'DELETE FROM 
 route('PUT', '/api/songs/:id/splits', ({ params, body }) => {
   if (!get('SELECT 1 FROM songs WHERE id=?', params.id)) throw notFound('Song');
   const list = Array.isArray(body.splits) ? body.splits : [];
+  if (list.some((s) => s == null || typeof s !== 'object')) throw bad('Each split must be an object with contributor_id and pct');
+  for (const s of list) {
+    if (!Number.isInteger(s.contributor_id)) throw bad('Each split needs an integer contributor_id');
+    if (!get('SELECT 1 FROM contributors WHERE id=?', s.contributor_id)) throw notFound(`Contributor ${s.contributor_id}`);
+  }
   const total = list.reduce((a, s) => a + requireNum(s.pct, 'pct'), 0);
   if (total > 100.0001) throw bad(`Splits total ${total}%, which exceeds 100%`);
   if (list.some((s) => s.pct < 0)) throw bad('Split percentages cannot be negative');
