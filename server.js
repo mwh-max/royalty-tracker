@@ -3,10 +3,10 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import crypto from 'node:crypto';
 import * as sql from './db.js';
 import { HttpError, bad, notFound } from './errors.js';
-import { usd, num, str, parseCsv, mapHeaders, parseMoneyMicros, parseMoney, microsToString, toMicros, detectDateOrder, normPeriod } from './parse.js';
+import { usd, num, str, parseCsv, parseMoneyMicros, parseMoney, microsToString, toMicros, detectDateOrder, normPeriod } from './parse.js';
+import { importStatement, relink } from './import.js';
 
 export { parseCsv, parseMoney, parseMoneyMicros, microsToString, detectDateOrder, normPeriod };
 
@@ -22,77 +22,6 @@ const tx = (fn) => sql.tx(db, fn);
 // run() on an UPDATE/DELETE by id; 404 when no row matched
 const runOne = (what, sql, ...p) => { const r = run(sql, ...p); if (!Number(r.changes)) throw notFound(what); return r; };
 
-
-// Returns the song id for a title/ISRC pair, or null. A key shared by several songs is ambiguous:
-// guessing would put earnings on the wrong song, so it falls through (ISRC, then title) and is left
-// unmatched for the user to assign. `ambiguous` is set on the result when that happened.
-function matchSong(title, isrc, out = {}) {
-  const pick = (rows) => {
-    if (rows.length === 1) return rows[0].id;
-    if (rows.length > 1) out.ambiguous = true;
-    return null;
-  };
-  if (isrc) {
-    const id = pick(all(`SELECT id FROM songs WHERE upper(replace(isrc,'-','')) = ?`, isrc.toUpperCase().replace(/-/g, '')));
-    if (id) return id;
-  }
-  if (title) return pick(all('SELECT id FROM songs WHERE lower(trim(title)) = ?', title.trim().toLowerCase()));
-  return null;
-}
-
-function importStatement({ source, filename, csv, force, dateOrder }) {
-  if (!source) throw bad('source is required');
-  const rows = parseCsv(csv || '');
-  if (rows.length < 2) throw bad('CSV needs a header row and at least one data row');
-  const map = mapHeaders(rows[0]);
-  if (map.amount == null) throw bad(`Could not find an amount column. Headers seen: ${rows[0].join(', ')}`);
-  if (map.title == null && map.isrc == null) throw bad('Need a title or ISRC column');
-  if (dateOrder != null && dateOrder !== 'mdy' && dateOrder !== 'dmy') throw bad("dateOrder must be 'mdy' or 'dmy'");
-  let order = dateOrder;
-  if (map.period != null) {
-    const detected = detectDateOrder(rows.slice(1).map((r) => r[map.period]));
-    if (detected === 'ambiguous' && !order) {
-      throw bad("Period dates like 05/03/2025 could be day-first or month-first. Re-import with dateOrder: 'dmy' or 'mdy'.");
-    }
-    if (detected && detected !== 'ambiguous' && order && order !== detected) {
-      throw bad(`dateOrder '${order}' contradicts the file, whose dates are ${detected === 'dmy' ? 'day-first' : 'month-first'}`);
-    }
-    order = order || detected || 'mdy';
-  }
-  const hash = crypto.createHash('sha256').update(source.toLowerCase()).update('\0').update(csv).digest('hex');
-  const dupe = get('SELECT id, imported_at FROM statements WHERE content_hash = ?', hash);
-  if (dupe && !force) {
-    throw new HttpError(409, `This statement was already imported as #${dupe.id} on ${dupe.imported_at}. Delete it first, or re-import with force to add it again.`);
-  }
-  let skipped = 0, matched = 0, ambiguous = 0;
-  const id = tx(() => {
-    const st = run('INSERT INTO statements (source, filename, content_hash) VALUES (?, ?, ?)', source, filename || null, hash);
-    const sid = Number(st.lastInsertRowid);
-    const ins = db.prepare(`INSERT INTO earnings (statement_id, song_id, raw_title, raw_isrc, platform, territory, period, units, amount_micros)
-                            VALUES (?,?,?,?,?,?,?,?,?)`);
-    for (const r of rows.slice(1)) {
-      const amount = parseMoneyMicros(r[map.amount]);
-      if (!Number.isFinite(amount)) { skipped++; continue; }
-      const title = map.title != null ? str(r[map.title]) : null;
-      const isrc = map.isrc != null ? str(r[map.isrc]) : null;
-      const hit = {};
-      const songId = matchSong(title, isrc, hit);
-      if (songId) matched++;
-      else if (hit.ambiguous) ambiguous++;
-      const units = map.units != null ? Math.round(parseMoney(r[map.units]) || 0) : 0;
-      ins.run(sid, songId, title, isrc,
-        map.platform != null ? str(r[map.platform]) : null,
-        map.territory != null ? str(r[map.territory]) : null,
-        map.period != null ? normPeriod(r[map.period], order) : null,
-        units, amount);
-    }
-    const count = get('SELECT COUNT(*) c FROM earnings WHERE statement_id = ?', sid).c;
-    run('UPDATE statements SET row_count = ? WHERE id = ?', count, sid);
-    return sid;
-  });
-  const total = get('SELECT COUNT(*) c, COALESCE(SUM(amount_micros),0) t FROM earnings WHERE statement_id = ?', id);
-  return { id, imported: total.c, matched, unmatched: total.c - matched, ambiguous, skipped, total: usd(total.t) };
-}
 
 // ---------- domain queries ----------
 function songsWithStats() {
@@ -258,13 +187,13 @@ route('POST', '/api/songs', ({ body }) => {
     requireStr(body.title, 'title'), str(body.isrc), str(body.release), str(body.notes));
   const id = Number(r.lastInsertRowid);
   // link any previously unmatched earnings
-  const linked = relink();
+  const linked = relink(db);
   return { id, linked };
 });
 route('PUT', '/api/songs/:id', ({ params, body }) => {
   runOne('Song', 'UPDATE songs SET title=?, isrc=?, release=?, notes=? WHERE id=?',
     requireStr(body.title, 'title'), str(body.isrc), str(body.release), str(body.notes), params.id);
-  return { linked: relink() };
+  return { linked: relink(db) };
 });
 route('DELETE', '/api/songs/:id', ({ params }) => { runOne('Song', 'DELETE FROM songs WHERE id=?', params.id); return { ok: true }; });
 route('PUT', '/api/songs/:id/splits', ({ params, body }) => {
@@ -300,7 +229,7 @@ route('GET', '/api/statements', () => all(`
          SUM(CASE WHEN e.song_id IS NULL THEN 1 ELSE 0 END) unmatched
   FROM statements st LEFT JOIN earnings e ON e.statement_id = st.id
   GROUP BY st.id ORDER BY st.id DESC`).map((st) => ({ ...st, total: usd(st.total) })));
-route('POST', '/api/statements/import', ({ body }) => importStatement(body));
+route('POST', '/api/statements/import', ({ body }) => importStatement(db, body));
 route('DELETE', '/api/statements/:id', ({ params }) => { runOne('Statement', 'DELETE FROM statements WHERE id=?', params.id); return { ok: true }; });
 route('GET', '/api/unmatched', () => all(`
   SELECT COALESCE(raw_title, raw_isrc, 'Unknown') name, raw_title, raw_isrc, COUNT(*) rows, SUM(amount_micros) total
@@ -355,16 +284,6 @@ route('GET', '/api/export/earnings.csv', () => {
   const head = 'title,isrc,platform,territory,period,units,amount,source';
   return { __csv: [head, ...rows.map((r) => [...[r.title, r.isrc, r.platform, r.territory, r.period].map(esc), r.units, microsToString(r.amount_micros), esc(r.source)].join(','))].join('\n') };
 });
-
-function relink() {
-  let n = 0;
-  const rows = all('SELECT DISTINCT raw_title, raw_isrc FROM earnings WHERE song_id IS NULL');
-  for (const r of rows) {
-    const id = matchSong(r.raw_title, r.raw_isrc);
-    if (id) n += Number(run(`UPDATE earnings SET song_id=? WHERE song_id IS NULL AND raw_title IS ? AND raw_isrc IS ?`, id, r.raw_title, r.raw_isrc).changes);
-  }
-  return n;
-}
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 
