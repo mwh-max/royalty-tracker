@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -25,7 +26,8 @@ CREATE TABLE IF NOT EXISTS splits (
 );
 CREATE TABLE IF NOT EXISTS statements (
   id INTEGER PRIMARY KEY, source TEXT NOT NULL, filename TEXT,
-  imported_at TEXT NOT NULL DEFAULT (datetime('now')), row_count INTEGER DEFAULT 0
+  imported_at TEXT NOT NULL DEFAULT (datetime('now')), row_count INTEGER DEFAULT 0,
+  content_hash TEXT
 );
 CREATE TABLE IF NOT EXISTS earnings (
   id INTEGER PRIMARY KEY,
@@ -46,7 +48,6 @@ CREATE TABLE IF NOT EXISTS advances (
   date TEXT, notes TEXT
 );
 `);
-
 // ---------- helpers ----------
 const all = (sql, ...p) => db.prepare(sql).all(...p);
 const get = (sql, ...p) => db.prepare(sql).get(...p);
@@ -58,6 +59,11 @@ const tx = (fn) => {
 };
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 const bad = (msg) => new HttpError(400, msg);
+
+// databases created before duplicate detection lack content_hash
+if (!all('PRAGMA table_info(statements)').some((c) => c.name === 'content_hash')) {
+  db.exec('ALTER TABLE statements ADD COLUMN content_hash TEXT');
+}
 
 const num = (v) => {
   if (v == null || v === '') return null;
@@ -112,16 +118,26 @@ function mapHeaders(headers) {
   return map;
 }
 
-const parseMoney = (s) => {
+export const parseMoney = (s) => {
   if (s == null) return NaN;
   let t = String(s).trim();
   if (!/\d/.test(t)) return NaN;
   const neg = /^\(.*\)$/.test(t) || t.startsWith('-');
   t = t.replace(/[^0-9.,]/g, '');
-  // decide decimal separator: last of , or . with <=2 trailing digits
-  const m = t.match(/[.,](\d{1,2})$/);
-  if (m) t = t.slice(0, -m[0].length).replace(/[.,]/g, '') + '.' + m[1];
-  else t = t.replace(/[.,]/g, '');
+  const lastDot = t.lastIndexOf('.'), lastComma = t.lastIndexOf(',');
+  let dec = -1; // index of the decimal separator, if any
+  if (lastDot >= 0 && lastComma >= 0) dec = Math.max(lastDot, lastComma);
+  else {
+    const sep = lastDot >= 0 ? '.' : lastComma >= 0 ? ',' : null;
+    if (sep && t.split(sep).length === 2) {
+      // a lone separator followed by exactly 3 digits after a short non-zero integer is a thousands
+      // separator (1,234); anything else (0.005, 12.5, 0.00456) is a decimal point
+      const [int, frac] = t.split(sep);
+      if (!(frac.length === 3 && int.length >= 1 && int.length <= 3 && !int.startsWith('0'))) dec = t.indexOf(sep);
+    }
+  }
+  const digits = (x) => x.replace(/[.,]/g, '');
+  t = dec >= 0 ? `${digits(t.slice(0, dec))}.${digits(t.slice(dec + 1))}` : digits(t);
   const n = Number(t);
   return neg ? -n : n;
 };
@@ -155,16 +171,21 @@ function matchSong(title, isrc) {
   return null;
 }
 
-function importStatement({ source, filename, csv }) {
+function importStatement({ source, filename, csv, force }) {
   if (!source) throw bad('source is required');
   const rows = parseCsv(csv || '');
   if (rows.length < 2) throw bad('CSV needs a header row and at least one data row');
   const map = mapHeaders(rows[0]);
   if (map.amount == null) throw bad(`Could not find an amount column. Headers seen: ${rows[0].join(', ')}`);
   if (map.title == null && map.isrc == null) throw bad('Need a title or ISRC column');
+  const hash = crypto.createHash('sha256').update(source.toLowerCase()).update('\0').update(csv).digest('hex');
+  const dupe = get('SELECT id, imported_at FROM statements WHERE content_hash = ?', hash);
+  if (dupe && !force) {
+    throw new HttpError(409, `This statement was already imported as #${dupe.id} on ${dupe.imported_at}. Delete it first, or re-import with force to add it again.`);
+  }
   let skipped = 0, matched = 0;
   const id = tx(() => {
-    const st = run('INSERT INTO statements (source, filename) VALUES (?, ?)', source, filename || null);
+    const st = run('INSERT INTO statements (source, filename, content_hash) VALUES (?, ?, ?)', source, filename || null, hash);
     const sid = Number(st.lastInsertRowid);
     const ins = db.prepare(`INSERT INTO earnings (statement_id, song_id, raw_title, raw_isrc, platform, territory, period, units, amount)
                             VALUES (?,?,?,?,?,?,?,?,?)`);
@@ -241,16 +262,31 @@ function payouts() {
 }
 
 function advances() {
-  const rows = all('SELECT * FROM advances ORDER BY date DESC, id DESC');
-  for (const a of rows) {
-    const earned = get(`SELECT COALESCE(SUM(e.amount),0) t FROM earnings e JOIN statements st ON st.id = e.statement_id
-                        WHERE lower(st.source) = lower(?) AND (? IS NULL OR e.period IS NULL OR e.period >= substr(?,1,7))`,
+  // Earnings from one source are a shared pool: advances recoup in date order, so
+  // an earlier advance uses up earnings before a later one can claim them.
+  const asc = all('SELECT * FROM advances ORDER BY date ASC, id ASC');
+  const groups = new Map();
+  for (const a of asc) {
+    a.earnedSince = get(`SELECT COALESCE(SUM(e.amount),0) t FROM earnings e JOIN statements st ON st.id = e.statement_id
+                         WHERE lower(st.source) = lower(?) AND (? IS NULL OR e.period IS NULL OR e.period >= substr(?,1,7))`,
       a.source, a.date, a.date).t;
-    a.recouped = Math.min(a.amount, earned);
-    a.earnedSince = earned;
-    a.balance = Math.max(0, a.amount - earned);
+    const key = a.source.toLowerCase();
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(a);
   }
-  return rows;
+  for (const list of groups.values()) {
+    const poolStart = list[0].earnedSince; // widest eligible window
+    let consumed = 0;
+    for (const a of list) {
+      // earnings dated before this advance were the first to be used up by earlier advances
+      const preDated = poolStart - a.earnedSince;
+      const available = Math.max(0, a.earnedSince - Math.max(0, consumed - preDated));
+      a.recouped = Math.min(a.amount, available);
+      a.balance = a.amount - a.recouped;
+      consumed += a.recouped;
+    }
+  }
+  return asc.reverse();
 }
 
 function payments() {
@@ -349,8 +385,14 @@ route('POST', '/api/payments', ({ body }) => {
     requireStr(body.source, 'source'), exp, str(body.expected_date), rec, str(body.received_date), str(body.notes)).lastInsertRowid) };
 });
 route('PUT', '/api/payments/:id', ({ params, body }) => {
-  run('UPDATE payments SET received_amount=?, received_date=?, notes=COALESCE(?, notes) WHERE id=?',
-    num(body.received_amount), str(body.received_date), str(body.notes), params.id);
+  const cur = get('SELECT * FROM payments WHERE id=?', params.id);
+  if (!cur) throw new HttpError(404, 'Payment not found');
+  // only fields present in the body change; an explicit null clears received_*
+  const has = (k) => Object.hasOwn(body, k);
+  run('UPDATE payments SET received_amount=?, received_date=?, notes=? WHERE id=?',
+    has('received_amount') ? num(body.received_amount) : cur.received_amount,
+    has('received_date') ? str(body.received_date) : cur.received_date,
+    str(body.notes) ?? cur.notes, params.id);
   return { ok: true };
 });
 route('DELETE', '/api/payments/:id', ({ params }) => { run('DELETE FROM payments WHERE id=?', params.id); return { ok: true }; });
