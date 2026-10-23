@@ -210,3 +210,42 @@ test('mlcBulkMatch rejects codes that could be read as formulas or break the CSV
   for (const id of ids) assert.ok(skipped.some((s) => s.song_id === id), `song ${id} should be skipped`);
   assert.ok(!rows.some((r) => r.isrc.startsWith('USZZ1270000')));
 });
+
+// ---------- composition readiness ----------
+
+test('compositionReadiness: ready only for complete, non-zero composition splits totalling 100%', async () => {
+  const { compositionReadiness } = await import('../queries.js');
+  const { data: a } = await call('POST', '/api/contributors', { name: 'Ready A' });
+  const { data: b } = await call('POST', '/api/contributors', { name: 'Ready B' });
+  const mk = async (title, shares) => {
+    const { data: song } = await call('POST', '/api/songs', { title });
+    if (shares) await call('PUT', `/api/songs/${song.id}/splits`, { type: 'composition', splits: shares });
+    return song.id;
+  };
+  const full = await mk('Rdy Full', [{ contributor_id: a.id, pct: 50 }, { contributor_id: b.id, pct: 50 }]);
+  const edge = await mk('Rdy Edge', [{ contributor_id: a.id, pct: 99.95 }]); // within the 0.06 tolerance
+  const short = await mk('Rdy Short', [{ contributor_id: a.id, pct: 60 }]);
+  const justShort = await mk('Rdy Just Short', [{ contributor_id: a.id, pct: 99.9 }]); // outside the tolerance
+  const zero = await mk('Rdy Zero', [{ contributor_id: a.id, pct: 100 }, { contributor_id: b.id, pct: 0 }]);
+  const none = await mk('Rdy None', null);
+  const over = await mk('Rdy Over', [{ contributor_id: a.id, pct: 100 }]);
+  app.db.prepare("UPDATE splits SET pct = 100.5 WHERE song_id = ? AND type = 'composition'").run(over); // the API caps at 100, so go direct
+  // a master split alone does not make a song ready
+  const masterOnly = await mk('Rdy Master Only', null);
+  await call('PUT', `/api/songs/${masterOnly}/splits`, { splits: [{ contributor_id: a.id, pct: 100 }] });
+
+  const r = compositionReadiness(app.db);
+  const by = Object.fromEntries(r.songs.map((s) => [s.song_id, s]));
+  assert.equal(by[full].status, 'ready');
+  assert.equal(by[edge].status, 'ready', '99.95% is inside 100 +/- 0.06');
+  assert.equal(by[short].status, 'short');
+  assert.match(by[short].message, /total 60%/);
+  assert.equal(by[justShort].status, 'short', '99.9% is outside the tolerance');
+  assert.equal(by[zero].status, 'zero-share');
+  assert.equal(by[none].status, 'missing');
+  assert.equal(by[masterOnly].status, 'missing', 'master splits do not count');
+  assert.equal(by[over].status, 'over');
+  assert.equal(r.total, r.songs.length);
+  assert.equal(r.ready, r.songs.filter((s) => s.status === 'ready').length);
+  assert.ok(r.ready >= 2);
+});

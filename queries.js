@@ -19,6 +19,27 @@ export function songsWithStats(db) {
   return songs;
 }
 
+// Is a song's set of composition splits complete enough to register as a work? The MLC wants shares
+// that total 100% (within 0.06 points, per its CWR guide) and no share of zero. This only checks what the
+// app stores; it does not know the MLC's other requirements (writer IPIs, publishers, titles).
+const SHARE_TOLERANCE = 0.06;
+
+export function compositionReadiness(db) {
+  const songs = all(db, 'SELECT id, title FROM songs ORDER BY title, id');
+  const shares = all(db, "SELECT song_id, pct FROM splits WHERE type = 'composition'");
+  const out = songs.map((s) => {
+    const mine = shares.filter((x) => x.song_id === s.id);
+    const total = Math.round(mine.reduce((a, x) => a + x.pct, 0) * 1e4) / 1e4;
+    let status = 'ready', message = null;
+    if (!mine.length) { status = 'missing'; message = 'No composition splits'; }
+    else if (mine.some((x) => x.pct <= 0)) { status = 'zero-share'; message = 'A composition share is 0%'; }
+    else if (total < 100 - SHARE_TOLERANCE - 1e-9) { status = 'short'; message = `Composition splits total ${total}%, not 100%`; }
+    else if (total > 100 + SHARE_TOLERANCE + 1e-9) { status = 'over'; message = `Composition splits total ${total}%, which exceeds 100%`; }
+    return { song_id: s.id, title: s.title, total, status, message };
+  });
+  return { total: out.length, ready: out.filter((s) => s.status === 'ready').length, songs: out };
+}
+
 export function dashboard(db, q) {
   const from = q.get('from') || '0000-00', to = q.get('to') || '9999-99';
   // With a date filter, earnings of unknown period can't be placed in the range, so they drop out

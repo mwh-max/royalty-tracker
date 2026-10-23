@@ -7,7 +7,7 @@ import { all as dbAll, get as dbGet, run as dbRun, tx as dbTx } from './db.js';
 import { HttpError, bad, notFound } from './errors.js';
 import { usd, num, str, microsToString, toMicros } from './parse.js';
 import { importStatement, relink, suggestSongs } from './import.js';
-import { songsWithStats, dashboard, payouts, payoutSummary, advances, payments, mlcBulkMatch, mlcBulkMatchCsv } from './queries.js';
+import { songsWithStats, compositionReadiness, dashboard, payouts, payoutSummary, advances, payments, mlcBulkMatch, mlcBulkMatchCsv } from './queries.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 
@@ -81,6 +81,7 @@ export function createRoutes(db) {
     return { ok: true, total, type };
   });
 
+  route('GET', '/api/composition/readiness', () => compositionReadiness(db));
   route('GET', '/api/contributors', () => all('SELECT * FROM contributors ORDER BY name'));
   route('POST', '/api/contributors', ({ body }) => ({
     id: Number(run('INSERT INTO contributors (name, email) VALUES (?,?)', requireStr(body.name, 'name'), str(body.email)).lastInsertRowid),

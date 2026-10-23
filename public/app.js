@@ -89,7 +89,7 @@ const pages = {
   },
 
   async songs() {
-    const [songs, contribs, mlc] = await Promise.all([api('GET', '/songs'), api('GET', '/contributors'), api('GET', '/mlc/bulk-match')]);
+    const [songs, contribs, ready, mlc] = await Promise.all([api('GET', '/songs'), api('GET', '/contributors'), api('GET', '/composition/readiness'), api('GET', '/mlc/bulk-match')]);
     const add = h('form', { class: 'row', onsubmit: act(async (e) => {
       e.preventDefault();
       const r = await api('POST', '/songs', formData(e.target));
@@ -115,7 +115,13 @@ const pages = {
         'Upload the file through the MLC member portal; this app cannot see which of your recordings the MLC has left unmatched.'),
       mlc.ready ? h('a', { href: '/api/export/mlc-bulk-match.csv', download: 'mlc-bulk-match.csv' }, 'Download CSV') : null,
       mlc.skipped.length ? h('ul', null, mlc.skipped.map((s) => h('li', null, `${s.title}: ${s.reason}`))) : null);
-    return [h('h2', null, 'Catalog & splits'), add, table(['Title', 'ISRC', 'MLC code', 'Earned#', 'Master splits', 'Composition splits', ''], rows, 'No songs yet.'), mlcPanel];
+    const notReady = ready.songs.filter((s) => s.status !== 'ready');
+    const readyPanel = ready.total ? h('div', null,
+      h('h2', null, 'Composition splits ready to register'),
+      h('p', { class: 'muted' }, `${ready.ready} of ${ready.total} songs have composition splits that total 100% with no zero share. ` +
+        'This checks shares only; the MLC also needs writer IPI numbers and publisher details, which this app does not store yet.'),
+      notReady.length ? h('ul', null, notReady.map((s) => h('li', null, `${s.title}: ${s.message}`))) : null) : null;
+    return [h('h2', null, 'Catalog & splits'), add, table(['Title', 'ISRC', 'MLC code', 'Earned#', 'Master splits', 'Composition splits', ''], rows, 'No songs yet.'), readyPanel, mlcPanel];
   },
 
   async contributors() {
