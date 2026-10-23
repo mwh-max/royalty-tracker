@@ -89,7 +89,7 @@ const pages = {
   },
 
   async songs() {
-    const [songs, contribs] = await Promise.all([api('GET', '/songs'), api('GET', '/contributors')]);
+    const [songs, contribs, ready] = await Promise.all([api('GET', '/songs'), api('GET', '/contributors'), api('GET', '/composition/readiness')]);
     const add = h('form', { class: 'row', onsubmit: act(async (e) => {
       e.preventDefault();
       const r = await api('POST', '/songs', formData(e.target));
@@ -102,7 +102,13 @@ const pages = {
       td(s.splits.length ? `${s.splits.map((x) => `${x.name} ${x.pct}%`).join(', ')}${s.splitTotal < 99.9999 ? ` (${s.splitTotal}% assigned)` : ''}` : 'No splits'),
       td(s.compositionSplits.length ? `${s.compositionSplits.map((x) => `${x.name} ${x.pct}%`).join(', ')}${s.compositionSplitTotal < 99.9999 ? ` (${s.compositionSplitTotal}% assigned)` : ''}` : 'None'),
       actions(btn('Splits', () => splitsDialog(s, contribs)), btn('Delete', confirmed(`Delete "${s.title}"? Its earnings become unmatched.`, act(() => api('DELETE', `/songs/${s.id}`))), 'link danger'))));
-    return [h('h2', null, 'Catalog & splits'), add, table(['Title', 'ISRC', 'Earned#', 'Master splits', 'Composition splits', ''], rows, 'No songs yet.')];
+    const notReady = ready.songs.filter((s) => s.status !== 'ready');
+    const readyPanel = ready.total ? h('div', null,
+      h('h2', null, 'Composition splits ready to register'),
+      h('p', { class: 'muted' }, `${ready.ready} of ${ready.total} songs have composition splits that total 100% with no zero share. ` +
+        'This checks shares only; the MLC also needs writer IPI numbers and publisher details, which this app does not store yet.'),
+      notReady.length ? h('ul', null, notReady.map((s) => h('li', null, `${s.title}: ${s.message}`))) : null) : null;
+    return [h('h2', null, 'Catalog & splits'), add, table(['Title', 'ISRC', 'Earned#', 'Master splits', 'Composition splits', ''], rows, 'No songs yet.'), readyPanel];
   },
 
   async contributors() {
