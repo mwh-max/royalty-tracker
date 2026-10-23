@@ -146,6 +146,30 @@ test('payments and advances keep sub-cent precision and status tolerance', async
   assert.equal((await call('POST', '/api/payments', { source: 'x', expected_amount: 1e15 })).status, 400);
 });
 
+// ---------- composition vs master splits ----------
+
+test('composition splits are listed separately and never change payouts', async () => {
+  const { data: a } = await call('POST', '/api/contributors', { name: 'Kind Master' });
+  const { data: w } = await call('POST', '/api/contributors', { name: 'Kind Writer' });
+  const { data: song } = await call('POST', '/api/songs', { title: 'Two Kinds 2050' });
+  await call('PUT', `/api/songs/${song.id}/splits`, { splits: [{ contributor_id: a.id, pct: 100 }] });
+  const ins = app.db.prepare("INSERT INTO splits (song_id, contributor_id, pct, type) VALUES (?,?,?,'composition')");
+  ins.run(song.id, w.id, 70); ins.run(song.id, a.id, 30);
+  await call('POST', '/api/statements/import', { source: 'KindSrc', csv: 'Track,Earnings,Sale Month\nTwo Kinds 2050,100.00,2050-01\n' });
+
+  const s = (await call('GET', '/api/songs')).data.find((x) => x.id === song.id);
+  assert.deepEqual(s.splits.map((x) => [x.contributor_id, x.pct, x.type]), [[a.id, 100, 'master']]);
+  assert.equal(s.splitTotal, 100);
+  assert.deepEqual(s.compositionSplits.map((x) => [x.contributor_id, x.pct]).sort((p, q) => q[1] - p[1]), [[w.id, 70], [a.id, 30]]);
+  assert.equal(s.compositionSplitTotal, 100);
+
+  const { data } = await call('GET', '/api/payouts/summary');
+  const pa = data.contributors.find((c) => c.id === a.id), pw = data.contributors.find((c) => c.id === w.id);
+  assert.equal(pa.owed, 100, 'master split pays in full; the 30% composition share adds nothing');
+  assert.equal(pw.owed, 0, 'a writer with only a composition split is owed nothing from statements');
+  assert.ok(!data.underSplitSongs.some((u) => u.song_id === song.id), 'master split is complete, so not under-split');
+});
+
 // ---------- MLC bulk match ----------
 
 test('mlcBulkMatch pairs ISRCs with MLC Song Codes and says why a song was skipped', async () => {

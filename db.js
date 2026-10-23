@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS splits (
   song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
   contributor_id INTEGER NOT NULL REFERENCES contributors(id) ON DELETE CASCADE,
   pct REAL NOT NULL,
-  PRIMARY KEY (song_id, contributor_id)
+  type TEXT NOT NULL DEFAULT 'master' CHECK (type IN ('master', 'composition')),
+  PRIMARY KEY (song_id, contributor_id, type)
 );
 CREATE TABLE IF NOT EXISTS statements (
   id INTEGER PRIMARY KEY, source TEXT NOT NULL, filename TEXT,
@@ -107,6 +108,24 @@ function migrate(db) {
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_earn_song ON earnings(song_id);
 CREATE INDEX IF NOT EXISTS idx_earn_period ON earnings(period);`);
+
+  // Splits used to be one list per song. They now come in two kinds: 'master' (the recording, which
+  // statement earnings and payouts use) and 'composition' (the song, for MLC registration). The primary
+  // key changes, so the table is rebuilt; every existing split becomes a master split.
+  if (!hasCol(db, 'splits', 'type')) {
+    tx(db, () => {
+      db.exec(`ALTER TABLE splits RENAME TO splits_old;
+        CREATE TABLE splits (
+          song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+          contributor_id INTEGER NOT NULL REFERENCES contributors(id) ON DELETE CASCADE,
+          pct REAL NOT NULL,
+          type TEXT NOT NULL DEFAULT 'master' CHECK (type IN ('master', 'composition')),
+          PRIMARY KEY (song_id, contributor_id, type)
+        );
+        INSERT INTO splits (song_id, contributor_id, pct, type) SELECT song_id, contributor_id, pct, 'master' FROM splits_old;
+        DROP TABLE splits_old;`);
+    });
+  }
 }
 
 export function openDb(file) {

@@ -60,6 +60,9 @@ export function createRoutes(db) {
   route('DELETE', '/api/songs/:id', ({ params }) => { runOne('Song', 'DELETE FROM songs WHERE id=?', params.id); return { ok: true }; });
   route('PUT', '/api/songs/:id/splits', ({ params, body }) => {
     if (!get('SELECT 1 FROM songs WHERE id=?', params.id)) throw notFound('Song');
+    // master splits (the recording) pay out statement earnings; composition splits (the song) are for MLC registration
+    const type = body.type ?? 'master';
+    if (type !== 'master' && type !== 'composition') throw bad("type must be 'master' or 'composition'");
     const list = Array.isArray(body.splits) ? body.splits : [];
     if (list.some((s) => s == null || typeof s !== 'object')) throw bad('Each split must be an object with contributor_id and pct');
     for (const s of list) {
@@ -72,10 +75,10 @@ export function createRoutes(db) {
     const ids = list.map((s) => s.contributor_id);
     if (new Set(ids).size !== ids.length) throw bad('A contributor appears twice on this song');
     tx(() => {
-      run('DELETE FROM splits WHERE song_id=?', params.id);
-      for (const s of list) run('INSERT INTO splits (song_id, contributor_id, pct) VALUES (?,?,?)', params.id, s.contributor_id, s.pct);
+      run('DELETE FROM splits WHERE song_id=? AND type=?', params.id, type);
+      for (const s of list) run('INSERT INTO splits (song_id, contributor_id, pct, type) VALUES (?,?,?,?)', params.id, s.contributor_id, s.pct, type);
     });
-    return { ok: true, total };
+    return { ok: true, total, type };
   });
 
   route('GET', '/api/contributors', () => all('SELECT * FROM contributors ORDER BY name'));

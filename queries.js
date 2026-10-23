@@ -6,12 +6,15 @@ export function songsWithStats(db) {
   const songs = all(db, `
     SELECT s.*, COALESCE(SUM(e.amount_micros),0) AS earned, COALESCE(SUM(e.units),0) AS units
     FROM songs s LEFT JOIN earnings e ON e.song_id = s.id GROUP BY s.id ORDER BY s.title`);
-  const splits = all(db, `SELECT sp.song_id, sp.contributor_id, sp.pct, c.name
+  const splits = all(db, `SELECT sp.song_id, sp.contributor_id, sp.pct, sp.type, c.name
                       FROM splits sp JOIN contributors c ON c.id = sp.contributor_id`);
   for (const s of songs) {
     s.earned = usd(s.earned);
-    s.splits = splits.filter((x) => x.song_id === s.id);
+    // `splits` / `splitTotal` are the master (recording) splits, as before; composition splits are separate
+    s.splits = splits.filter((x) => x.song_id === s.id && x.type === 'master');
     s.splitTotal = s.splits.reduce((a, b) => a + b.pct, 0);
+    s.compositionSplits = splits.filter((x) => x.song_id === s.id && x.type === 'composition');
+    s.compositionSplitTotal = s.compositionSplits.reduce((a, b) => a + b.pct, 0);
   }
   return songs;
 }
@@ -59,7 +62,7 @@ function payoutData(db) {
   const earned = new Map(all(db, 'SELECT song_id, SUM(amount_micros) t FROM earnings WHERE song_id IS NOT NULL GROUP BY song_id')
     .map((r) => [r.song_id, r.t]));
   const splits = all(db, `SELECT sp.song_id, sp.contributor_id, sp.pct, s.title
-                      FROM splits sp JOIN songs s ON s.id = sp.song_id ORDER BY s.title`)
+                      FROM splits sp JOIN songs s ON s.id = sp.song_id WHERE sp.type = 'master' ORDER BY s.title`)
     .map((sp) => { const e = earned.get(sp.song_id) || 0; return { ...sp, earned: e, share: shareOf(e, sp.pct) }; });
   const contributors = all(db, 'SELECT id, name, email FROM contributors ORDER BY name').map((c) => {
     const songs = splits.filter((x) => x.contributor_id === c.id);

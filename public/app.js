@@ -101,6 +101,7 @@ const pages = {
     const rows = songs.map((s) => h('tr', null,
       td(s.title), td(s.isrc || ''), td(s.mlc_song_code || ''), td(money(s.earned), true),
       td(s.splits.length ? `${s.splits.map((x) => `${x.name} ${x.pct}%`).join(', ')}${s.splitTotal < 99.9999 ? ` (${s.splitTotal}% assigned)` : ''}` : 'No splits'),
+      td(s.compositionSplits.length ? `${s.compositionSplits.map((x) => `${x.name} ${x.pct}%`).join(', ')}${s.compositionSplitTotal < 99.9999 ? ` (${s.compositionSplitTotal}% assigned)` : ''}` : 'None'),
       actions(btn('Splits', () => splitsDialog(s, contribs)),
         btn('MLC code', act(async () => {
           const code = prompt(`MLC Song Code for "${s.title}" (blank clears it)`, s.mlc_song_code ?? '');
@@ -114,7 +115,7 @@ const pages = {
         'Upload the file through the MLC member portal; this app cannot see which of your recordings the MLC has left unmatched.'),
       mlc.ready ? h('a', { href: '/api/export/mlc-bulk-match.csv', download: 'mlc-bulk-match.csv' }, 'Download CSV') : null,
       mlc.skipped.length ? h('ul', null, mlc.skipped.map((s) => h('li', null, `${s.title}: ${s.reason}`))) : null);
-    return [h('h2', null, 'Catalog & splits'), add, table(['Title', 'ISRC', 'MLC code', 'Earned#', 'Splits', ''], rows, 'No songs yet.'), mlcPanel];
+    return [h('h2', null, 'Catalog & splits'), add, table(['Title', 'ISRC', 'MLC code', 'Earned#', 'Master splits', 'Composition splits', ''], rows, 'No songs yet.'), mlcPanel];
   },
 
   async contributors() {
@@ -215,7 +216,7 @@ const pages = {
   },
 };
 
-function splitsDialog(song, contribs) {
+function splitsDialog(song, contribs, type = 'master') {
   const dlg = $('#dlg');
   const rowsBox = h('div');
   const addRow = (sp = {}) => {
@@ -225,8 +226,14 @@ function splitsDialog(song, contribs) {
       btn('Remove', () => row.remove(), 'link danger'));
     rowsBox.append(row);
   };
-  song.splits.forEach(addRow);
-  dlg.replaceChildren(h('h2', { style: 'margin-top:0' }, `Splits: ${song.title}`),
+  (type === 'composition' ? song.compositionSplits : song.splits).forEach(addRow);
+  const kind = h('select', { 'aria-label': 'Split type', onchange: () => splitsDialog(song, contribs, kind.value) },
+    h('option', { value: 'master', selected: type === 'master' }, 'Master (the recording)'),
+    h('option', { value: 'composition', selected: type === 'composition' }, 'Composition (the song, for the MLC)'));
+  dlg.replaceChildren(h('h2', { style: 'margin-top:0' }, `Splits: ${song.title}`), kind,
+    h('p', { class: 'muted' }, type === 'composition'
+      ? 'Writer and publisher shares of the song. Used for MLC registration; they do not change payouts.'
+      : 'Shares of the recording. These decide what each contributor is owed from statements. Switching type discards unsaved edits.'),
     contribs.length ? null : h('p', { class: 'muted' }, 'Add contributors first.'),
     rowsBox,
     h('div', { class: 'row' },
@@ -235,7 +242,7 @@ function splitsDialog(song, contribs) {
       btn('Cancel', () => dlg.close(), ''),
       btn('Save', async () => {
         const splits = [...rowsBox.children].map((r) => ({ contributor_id: Number(r.querySelector('select').value), pct: Number(r.querySelector('input').value) }));
-        try { await api('PUT', `/songs/${song.id}/splits`, { splits }); dlg.close(); say('Splits saved.'); render(); }
+        try { await api('PUT', `/songs/${song.id}/splits`, { type, splits }); dlg.close(); say(type === 'composition' ? 'Composition splits saved.' : 'Splits saved.'); render(); }
         catch (e) { say(e.message, true); }
       }, 'primary')));
   dlg.showModal();
