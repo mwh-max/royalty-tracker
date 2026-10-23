@@ -1,6 +1,6 @@
 // Read-side domain queries: song stats, dashboard, payouts, advances and payments.
 import { all, get } from './db.js';
-import { usd } from './parse.js';
+import { usd, normIsrc } from './parse.js';
 
 export function songsWithStats(db) {
   const songs = all(db, `
@@ -138,3 +138,40 @@ export function payments(db) {
              received_amount: usd(p.received_micros), received_date: p.received_date, notes: p.notes, status };
   });
 }
+
+// The MLC's bulk-match upload pairs a recording (ISRC) with a registered work (MLC Song Code).
+// Songs with an MLC code that can't be used are returned in `skipped` with the reason; songs without a
+// code aren't listed, since they simply aren't registered yet.
+const MLC_CODE = /^[^\s,"'=+\-@][^\s,"']*$/; // no whitespace, comma or quote anywhere; can't start like a spreadsheet formula
+
+export function mlcBulkMatch(db) {
+  const rows = [], skipped = [];
+  const songs = all(db, `SELECT id, title, isrc, mlc_song_code FROM songs
+                         WHERE mlc_song_code IS NOT NULL AND trim(mlc_song_code) <> '' ORDER BY title, id`);
+  const usable = [];
+  for (const s of songs) {
+    const skip = (reason) => skipped.push({ song_id: s.id, title: s.title, reason });
+    const code = s.mlc_song_code.trim();
+    const isrc = normIsrc(s.isrc);
+    if (!s.isrc) skip('Has an MLC Song Code but no ISRC');
+    else if (!isrc) skip('ISRC must be 12 letters or digits');
+    else if (!MLC_CODE.test(code)) skip('MLC Song Code has spaces, commas, quotes or a leading = + - @');
+    else usable.push({ song: s, isrc, code });
+  }
+  // One ISRC can't point at two works: skip every song in that clash rather than pick one.
+  const codes = new Map();
+  for (const u of usable) codes.set(u.isrc, (codes.get(u.isrc) || new Set()).add(u.code));
+  const seen = new Set();
+  for (const u of usable) {
+    if (codes.get(u.isrc).size > 1) {
+      skipped.push({ song_id: u.song.id, title: u.song.title, reason: `ISRC ${u.isrc} is paired with different MLC Song Codes on different songs` });
+    } else if (!seen.has(u.isrc)) { // the same pair on two songs needs only one row
+      seen.add(u.isrc);
+      rows.push({ isrc: u.isrc, mlc_song_code: u.code });
+    }
+  }
+  return { rows, skipped };
+}
+
+export const mlcBulkMatchCsv = (rows) =>
+  ['ISRC,MLC Song Code', ...rows.map((r) => `${r.isrc},${r.mlc_song_code}`)].join('\n') + '\n';

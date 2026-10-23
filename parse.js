@@ -142,6 +142,13 @@ export const normPeriod = (s, order = 'mdy') => {
   return s;
 };
 
+// An ISRC as the MLC's bulk upload wants it: exactly 12 letters/digits, upper-cased. Hyphens and
+// spaces (US-ZZ1-25-00001) are dropped first. null when the value can't be one.
+export const normIsrc = (s) => {
+  const t = String(s ?? '').replace(/[-\s]/g, '').toUpperCase();
+  return /^[A-Z0-9]{12}$/.test(t) ? t : null;
+};
+
 // ---------- title similarity (for suggesting songs; never used to assign automatically) ----------
 
 // Words that mark a different cut of the same song, not a different song.

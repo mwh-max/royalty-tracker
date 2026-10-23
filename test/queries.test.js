@@ -169,3 +169,44 @@ test('composition splits are listed separately and never change payouts', async 
   assert.equal(pw.owed, 0, 'a writer with only a composition split is owed nothing from statements');
   assert.ok(!data.underSplitSongs.some((u) => u.song_id === song.id), 'master split is complete, so not under-split');
 });
+
+// ---------- MLC bulk match ----------
+
+test('mlcBulkMatch pairs ISRCs with MLC Song Codes and says why a song was skipped', async () => {
+  const mk = async (title, isrc, code) => Number(app.db.prepare('INSERT INTO songs (title, isrc, mlc_song_code) VALUES (?,?,?)').run(title, isrc, code).lastInsertRowid);
+  const ok = await mk('Mlc Ok', 'US-ZZ1-26-00001', 'M0001');
+  await mk('Mlc Not Registered', 'USZZ12600002', null);
+  const noIsrc = await mk('Mlc No Isrc', null, 'M0003');
+  const badIsrc = await mk('Mlc Bad Isrc', 'USZZ126', 'M0004');
+  const clashA = await mk('Mlc Clash A', 'USZZ12600005', 'M0005');
+  const clashB = await mk('Mlc Clash B', 'USZZ12600005', 'M0006');
+  await mk('Mlc Same A', 'USZZ12600007', 'M0007');
+  await mk('Mlc Same B', 'USZZ12600007', 'M0007');
+  const { mlcBulkMatch, mlcBulkMatchCsv } = await import('../queries.js');
+
+  const { rows, skipped } = mlcBulkMatch(app.db);
+  assert.deepEqual(rows, [
+    { isrc: 'USZZ12600001', mlc_song_code: 'M0001' },
+    { isrc: 'USZZ12600007', mlc_song_code: 'M0007' },
+  ]);
+  const why = Object.fromEntries(skipped.map((s) => [s.song_id, s.reason]));
+  assert.deepEqual(Object.keys(why).map(Number).sort((a, b) => a - b), [noIsrc, badIsrc, clashA, clashB].sort((a, b) => a - b));
+  assert.match(why[noIsrc], /no ISRC/);
+  assert.match(why[badIsrc], /12 letters/);
+  assert.match(why[clashA], /different MLC Song Codes/);
+  assert.match(why[clashB], /different MLC Song Codes/, 'a clash skips both songs, not just one');
+  assert.ok(!(ok in why));
+  assert.equal(mlcBulkMatchCsv(rows), 'ISRC,MLC Song Code\nUSZZ12600001,M0001\nUSZZ12600007,M0007\n');
+});
+
+test('mlcBulkMatch rejects codes that could be read as formulas or break the CSV', async () => {
+  const bad = ['=SUM(1)', '+1', '-1', '@x', 'a b', 'a,b', 'a"b'];
+  const ids = [];
+  for (const [i, code] of bad.entries()) {
+    ids.push(Number(app.db.prepare('INSERT INTO songs (title, isrc, mlc_song_code) VALUES (?,?,?)').run(`Mlc Code ${i}`, `USZZ1270000${i}`, code).lastInsertRowid));
+  }
+  const { mlcBulkMatch } = await import('../queries.js');
+  const { rows, skipped } = mlcBulkMatch(app.db);
+  for (const id of ids) assert.ok(skipped.some((s) => s.song_id === id), `song ${id} should be skipped`);
+  assert.ok(!rows.some((r) => r.isrc.startsWith('USZZ1270000')));
+});
