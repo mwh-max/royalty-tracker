@@ -34,20 +34,23 @@ CREATE TABLE IF NOT EXISTS earnings (
   statement_id INTEGER NOT NULL REFERENCES statements(id) ON DELETE CASCADE,
   song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL,
   raw_title TEXT, raw_isrc TEXT, platform TEXT, territory TEXT,
-  period TEXT, units INTEGER DEFAULT 0, amount REAL NOT NULL
+  period TEXT, units INTEGER DEFAULT 0, amount_micros INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_earn_song ON earnings(song_id);
-CREATE INDEX IF NOT EXISTS idx_earn_period ON earnings(period);
 CREATE TABLE IF NOT EXISTS payments (
   id INTEGER PRIMARY KEY, source TEXT NOT NULL,
-  expected_amount REAL, expected_date TEXT,
-  received_amount REAL, received_date TEXT, notes TEXT
+  expected_micros INTEGER, expected_date TEXT,
+  received_micros INTEGER, received_date TEXT, notes TEXT
 );
 CREATE TABLE IF NOT EXISTS advances (
-  id INTEGER PRIMARY KEY, source TEXT NOT NULL, amount REAL NOT NULL,
+  id INTEGER PRIMARY KEY, source TEXT NOT NULL, amount_micros INTEGER NOT NULL,
   date TEXT, notes TEXT
 );
 `);
+// Money is stored as integer micro-dollars (1e-6 USD) so sums are exact and sub-cent per-stream
+// amounts survive; the API still speaks decimal dollars. Floats only appear when converting at the edges.
+const MICROS = 1_000_000;
+const usd = (m) => (m == null ? null : m / MICROS);
+
 // ---------- helpers ----------
 const all = (sql, ...p) => db.prepare(sql).all(...p);
 const get = (sql, ...p) => db.prepare(sql).get(...p);
@@ -67,6 +70,48 @@ const runOne = (what, sql, ...p) => { const r = run(sql, ...p); if (!Number(r.ch
 if (!all('PRAGMA table_info(statements)').some((c) => c.name === 'content_hash')) {
   db.exec('ALTER TABLE statements ADD COLUMN content_hash TEXT');
 }
+
+// Older databases stored dollars as REAL (earnings.amount, payments.*_amount, advances.amount);
+// rebuild those tables with integer micro-dollars.
+const hasCol = (table, col) => all(`PRAGMA table_info(${table})`).some((c) => c.name === col);
+if (hasCol('earnings', 'amount') || hasCol('payments', 'expected_amount') || hasCol('advances', 'amount')) {
+  const toMicro = (col) => `CAST(ROUND(${col} * ${MICROS}) AS INTEGER)`;
+  tx(() => {
+    if (hasCol('earnings', 'amount')) {
+      db.exec(`ALTER TABLE earnings RENAME TO earnings_old;
+        CREATE TABLE earnings (
+          id INTEGER PRIMARY KEY,
+          statement_id INTEGER NOT NULL REFERENCES statements(id) ON DELETE CASCADE,
+          song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL,
+          raw_title TEXT, raw_isrc TEXT, platform TEXT, territory TEXT,
+          period TEXT, units INTEGER DEFAULT 0, amount_micros INTEGER NOT NULL
+        );
+        INSERT INTO earnings SELECT id, statement_id, song_id, raw_title, raw_isrc, platform, territory, period, units, ${toMicro('amount')} FROM earnings_old;
+        DROP TABLE earnings_old;`);
+    }
+    if (hasCol('payments', 'expected_amount')) {
+      db.exec(`ALTER TABLE payments RENAME TO payments_old;
+        CREATE TABLE payments (
+          id INTEGER PRIMARY KEY, source TEXT NOT NULL,
+          expected_micros INTEGER, expected_date TEXT,
+          received_micros INTEGER, received_date TEXT, notes TEXT
+        );
+        INSERT INTO payments SELECT id, source, ${toMicro('expected_amount')}, expected_date, ${toMicro('received_amount')}, received_date, notes FROM payments_old;
+        DROP TABLE payments_old;`);
+    }
+    if (hasCol('advances', 'amount')) {
+      db.exec(`ALTER TABLE advances RENAME TO advances_old;
+        CREATE TABLE advances (
+          id INTEGER PRIMARY KEY, source TEXT NOT NULL, amount_micros INTEGER NOT NULL,
+          date TEXT, notes TEXT
+        );
+        INSERT INTO advances SELECT id, source, ${toMicro('amount')}, date, notes FROM advances_old;
+        DROP TABLE advances_old;`);
+    }
+  });
+}
+db.exec(`CREATE INDEX IF NOT EXISTS idx_earn_song ON earnings(song_id);
+CREATE INDEX IF NOT EXISTS idx_earn_period ON earnings(period);`);
 
 const num = (v) => {
   if (v == null || v === '') return null;
@@ -121,7 +166,9 @@ function mapHeaders(headers) {
   return map;
 }
 
-export const parseMoney = (s) => {
+// Exact decimal parsing of a statement amount to integer micro-dollars (no float arithmetic on the
+// digits). Digits beyond the sixth decimal place are rounded half-up. NaN if there's no usable number.
+export const parseMoneyMicros = (s) => {
   if (s == null) return NaN;
   let t = String(s).trim();
   if (!/\d/.test(t)) return NaN;
@@ -140,9 +187,26 @@ export const parseMoney = (s) => {
     }
   }
   const digits = (x) => x.replace(/[.,]/g, '');
-  t = dec >= 0 ? `${digits(t.slice(0, dec))}.${digits(t.slice(dec + 1))}` : digits(t);
-  const n = Number(t);
-  return neg ? -n : n;
+  const whole = digits(dec >= 0 ? t.slice(0, dec) : t) || '0';
+  const frac = dec >= 0 ? digits(t.slice(dec + 1)) : '';
+  let m = Number(whole) * MICROS + Number(frac.slice(0, 6).padEnd(6, '0')) + (frac[6] >= '5' ? 1 : 0);
+  if (!Number.isSafeInteger(m)) return NaN;
+  return neg ? -m : m;
+};
+// dollars as a float, for the places that only need a rough number (e.g. unit counts)
+export const parseMoney = (s) => parseMoneyMicros(s) / MICROS;
+
+// Integer micros -> plain decimal string without float error ("1234.50456", "-3.5").
+export const microsToString = (m) => {
+  const abs = Math.abs(m);
+  const frac = String(abs % MICROS).padStart(6, '0').replace(/0+$/, '');
+  return `${m < 0 ? '-' : ''}${Math.floor(abs / MICROS)}${frac ? '.' + frac : ''}`;
+};
+// A JSON dollar amount from a client -> micros
+const toMicros = (dollars) => {
+  const m = Math.round(dollars * MICROS);
+  if (!Number.isSafeInteger(m)) throw bad('Amount is out of range');
+  return m;
 };
 
 // Day-first vs month-first dates (05/03/2025) can't be told apart from one value, so the
@@ -230,10 +294,10 @@ function importStatement({ source, filename, csv, force, dateOrder }) {
   const id = tx(() => {
     const st = run('INSERT INTO statements (source, filename, content_hash) VALUES (?, ?, ?)', source, filename || null, hash);
     const sid = Number(st.lastInsertRowid);
-    const ins = db.prepare(`INSERT INTO earnings (statement_id, song_id, raw_title, raw_isrc, platform, territory, period, units, amount)
+    const ins = db.prepare(`INSERT INTO earnings (statement_id, song_id, raw_title, raw_isrc, platform, territory, period, units, amount_micros)
                             VALUES (?,?,?,?,?,?,?,?,?)`);
     for (const r of rows.slice(1)) {
-      const amount = parseMoney(r[map.amount]);
+      const amount = parseMoneyMicros(r[map.amount]);
       if (!Number.isFinite(amount)) { skipped++; continue; }
       const title = map.title != null ? str(r[map.title]) : null;
       const isrc = map.isrc != null ? str(r[map.isrc]) : null;
@@ -252,18 +316,19 @@ function importStatement({ source, filename, csv, force, dateOrder }) {
     run('UPDATE statements SET row_count = ? WHERE id = ?', count, sid);
     return sid;
   });
-  const total = get('SELECT COUNT(*) c, COALESCE(SUM(amount),0) t FROM earnings WHERE statement_id = ?', id);
-  return { id, imported: total.c, matched, unmatched: total.c - matched, ambiguous, skipped, total: total.t };
+  const total = get('SELECT COUNT(*) c, COALESCE(SUM(amount_micros),0) t FROM earnings WHERE statement_id = ?', id);
+  return { id, imported: total.c, matched, unmatched: total.c - matched, ambiguous, skipped, total: usd(total.t) };
 }
 
 // ---------- domain queries ----------
 function songsWithStats() {
   const songs = all(`
-    SELECT s.*, COALESCE(SUM(e.amount),0) AS earned, COALESCE(SUM(e.units),0) AS units
+    SELECT s.*, COALESCE(SUM(e.amount_micros),0) AS earned, COALESCE(SUM(e.units),0) AS units
     FROM songs s LEFT JOIN earnings e ON e.song_id = s.id GROUP BY s.id ORDER BY s.title`);
   const splits = all(`SELECT sp.song_id, sp.contributor_id, sp.pct, c.name
                       FROM splits sp JOIN contributors c ON c.id = sp.contributor_id`);
   for (const s of songs) {
+    s.earned = usd(s.earned);
     s.splits = splits.filter((x) => x.song_id === s.id);
     s.splitTotal = s.splits.reduce((a, b) => a + b.pct, 0);
   }
@@ -277,67 +342,84 @@ function dashboard(q) {
   const filtered = q.has('from') || q.has('to');
   const where = filtered ? `WHERE e.period >= ? AND e.period <= ?` : `WHERE ? IS NOT NULL AND ? IS NOT NULL`;
   const args = [from, to];
-  const total = get(`SELECT COALESCE(SUM(amount),0) t, COALESCE(SUM(units),0) u FROM earnings e ${where}`, ...args);
-  const byPeriod = all(`SELECT COALESCE(period,'unknown') k, SUM(amount) v FROM earnings e ${where} GROUP BY period ORDER BY period`, ...args);
-  const byPlatform = all(`SELECT COALESCE(platform,'Unknown') k, SUM(amount) v, SUM(units) u FROM earnings e ${where} GROUP BY platform ORDER BY v DESC`, ...args);
-  const byTerritory = all(`SELECT COALESCE(territory,'Unknown') k, SUM(amount) v FROM earnings e ${where} GROUP BY territory ORDER BY v DESC LIMIT 15`, ...args);
-  const byTrack = all(`SELECT COALESCE(s.title, e.raw_title, 'Unknown') k, e.song_id, SUM(e.amount) v, SUM(e.units) u
+  const total = get(`SELECT COALESCE(SUM(amount_micros),0) t, COALESCE(SUM(units),0) u FROM earnings e ${where}`, ...args);
+  const byPeriod = all(`SELECT COALESCE(period,'unknown') k, SUM(amount_micros) v FROM earnings e ${where} GROUP BY period ORDER BY period`, ...args);
+  const byPlatform = all(`SELECT COALESCE(platform,'Unknown') k, SUM(amount_micros) v, SUM(units) u FROM earnings e ${where} GROUP BY platform ORDER BY v DESC`, ...args);
+  const byTerritory = all(`SELECT COALESCE(territory,'Unknown') k, SUM(amount_micros) v FROM earnings e ${where} GROUP BY territory ORDER BY v DESC LIMIT 15`, ...args);
+  const byTrack = all(`SELECT COALESCE(s.title, e.raw_title, 'Unknown') k, e.song_id, SUM(e.amount_micros) v, SUM(e.units) u
                        FROM earnings e LEFT JOIN songs s ON s.id = e.song_id ${where}
                        GROUP BY COALESCE(e.song_id, 'raw:' || e.raw_title) ORDER BY v DESC LIMIT 15`, ...args);
-  const unmatched = get(`SELECT COUNT(*) c, COALESCE(SUM(amount),0) t FROM earnings e ${where} AND e.song_id IS NULL`, ...args);
-  const undated = get(`SELECT COUNT(*) c, COALESCE(SUM(amount),0) t FROM earnings WHERE period IS NULL`);
+  const unmatched = get(`SELECT COUNT(*) c, COALESCE(SUM(amount_micros),0) t FROM earnings e ${where} AND e.song_id IS NULL`, ...args);
+  const undated = get(`SELECT COUNT(*) c, COALESCE(SUM(amount_micros),0) t FROM earnings WHERE period IS NULL`);
   // payments and advances are dated YYYY-MM-DD; filter on the month, and (as with earnings) leave out
   // undated ones when a filter is active, counting them instead of hiding them.
   const payDate = `substr(COALESCE(received_date, expected_date),1,7)`;
   const payWhere = filtered ? `WHERE ${payDate} >= ? AND ${payDate} <= ?` : `WHERE ? IS NOT NULL AND ? IS NOT NULL`;
-  const pay = get(`SELECT COALESCE(SUM(expected_amount),0) exp, COALESCE(SUM(received_amount),0) rec FROM payments ${payWhere}`, ...args);
+  const pay = get(`SELECT COALESCE(SUM(expected_micros),0) exp, COALESCE(SUM(received_micros),0) rec FROM payments ${payWhere}`, ...args);
   const undatedPayments = get(`SELECT COUNT(*) c FROM payments WHERE COALESCE(received_date, expected_date) IS NULL`).c;
   const advWhere = filtered ? `WHERE substr(date,1,7) >= ? AND substr(date,1,7) <= ?` : `WHERE ? IS NOT NULL AND ? IS NOT NULL`;
-  const adv = get(`SELECT COALESCE(SUM(amount),0) t FROM advances ${advWhere}`, ...args);
+  const adv = get(`SELECT COALESCE(SUM(amount_micros),0) t FROM advances ${advWhere}`, ...args);
   const undatedAdvances = get(`SELECT COUNT(*) c FROM advances WHERE date IS NULL`).c;
-  return { total: total.t, units: total.u, byPeriod, byPlatform, byTerritory, byTrack, unmatched, undated,
-           payments: pay, advances: adv.t, undatedPayments, undatedAdvances };
+  const dollars = (rows) => rows.map((r) => ({ ...r, v: usd(r.v) }));
+  const count = (r) => ({ c: r.c, t: usd(r.t) });
+  return { total: usd(total.t), units: total.u, byPeriod: dollars(byPeriod), byPlatform: dollars(byPlatform),
+           byTerritory: dollars(byTerritory), byTrack: dollars(byTrack), unmatched: count(unmatched), undated: count(undated),
+           payments: { exp: usd(pay.exp), rec: usd(pay.rec) }, advances: usd(adv.t), undatedPayments, undatedAdvances };
 }
 
 // Payouts are gross: each contributor's split of the earnings on matched songs. Nothing is netted
-// (the app records no payments *to* contributors), and share of a song not covered by its splits, plus
-// earnings not matched to any song, are reported as `unallocated` instead of silently disappearing.
+// (the app records no payments *to* contributors). Shares are rounded to whole micro-dollars per
+// song and split, so a contributor's total is an exact integer sum; whatever isn't owed to anyone
+// (the part of a song not covered by its splits, earnings matched to no song, and any sub-micro
+// rounding dust) is reported as `unallocated`, so owed + unallocated always equals total earnings.
+const shareOf = (earned, pct) => { const r = Math.round(Math.abs(earned) * pct / 100); return earned < 0 ? -r : r; };
+
+function payoutData() {
+  const earned = new Map(all('SELECT song_id, SUM(amount_micros) t FROM earnings WHERE song_id IS NOT NULL GROUP BY song_id')
+    .map((r) => [r.song_id, r.t]));
+  const splits = all(`SELECT sp.song_id, sp.contributor_id, sp.pct, s.title
+                      FROM splits sp JOIN songs s ON s.id = sp.song_id ORDER BY s.title`)
+    .map((sp) => { const e = earned.get(sp.song_id) || 0; return { ...sp, earned: e, share: shareOf(e, sp.pct) }; });
+  const contributors = all('SELECT id, name, email FROM contributors ORDER BY name').map((c) => {
+    const songs = splits.filter((x) => x.contributor_id === c.id);
+    return { ...c, owed: songs.reduce((a, x) => a + x.share, 0), songs };
+  }).sort((a, b) => b.owed - a.owed);
+  return { earned, splits, contributors };
+}
+
 function payouts() {
-  const rows = all(`
-    SELECT c.id, c.name, c.email,
-           COALESCE(SUM(e.amount * sp.pct / 100.0),0) AS owed
-    FROM contributors c
-    LEFT JOIN splits sp ON sp.contributor_id = c.id
-    LEFT JOIN earnings e ON e.song_id = sp.song_id
-    GROUP BY c.id ORDER BY owed DESC`);
-  const bySong = all(`
-    SELECT sp.contributor_id, s.id song_id, s.title, sp.pct, COALESCE(SUM(e.amount),0) earned,
-           COALESCE(SUM(e.amount),0) * sp.pct / 100.0 share
-    FROM splits sp JOIN songs s ON s.id = sp.song_id
-    LEFT JOIN earnings e ON e.song_id = s.id GROUP BY sp.song_id, sp.contributor_id`);
-  for (const r of rows) r.songs = bySong.filter((x) => x.contributor_id === r.id);
-  return rows;
+  return payoutData().contributors.map((c) => ({
+    ...c, owed: usd(c.owed),
+    songs: c.songs.map((x) => ({ contributor_id: x.contributor_id, song_id: x.song_id, title: x.title, pct: x.pct,
+                                 earned: usd(x.earned), share: usd(x.share) })),
+  }));
 }
 
 function payoutSummary() {
-  const contributors = payouts();
-  const songs = songsWithStats().filter((s) => s.earned !== 0 && s.splitTotal < 99.9999)
-    .map((s) => ({ song_id: s.id, title: s.title, earned: s.earned, splitTotal: s.splitTotal,
-                   unallocated: s.earned * (100 - s.splitTotal) / 100 }));
-  const unmatched = get('SELECT COALESCE(SUM(amount),0) t FROM earnings WHERE song_id IS NULL').t;
-  const unallocated = songs.reduce((a, x) => a + x.unallocated, 0) + unmatched;
-  const total = get('SELECT COALESCE(SUM(amount),0) t FROM earnings').t;
+  const { earned, splits, contributors } = payoutData();
+  const allocated = new Map(), pctTotal = new Map();
+  for (const sp of splits) {
+    allocated.set(sp.song_id, (allocated.get(sp.song_id) || 0) + sp.share);
+    pctTotal.set(sp.song_id, (pctTotal.get(sp.song_id) || 0) + sp.pct);
+  }
+  const titles = new Map(all('SELECT id, title FROM songs').map((r) => [r.id, r.title]));
+  const underSplitSongs = [...earned].filter(([id, e]) => e !== 0 && (pctTotal.get(id) || 0) < 99.9999)
+    .map(([id, e]) => ({ song_id: id, title: titles.get(id), earned: usd(e), splitTotal: pctTotal.get(id) || 0,
+                         unallocated: usd(e - (allocated.get(id) || 0)) }));
+  const total = get('SELECT COALESCE(SUM(amount_micros),0) t FROM earnings').t;
+  const unmatched = get('SELECT COALESCE(SUM(amount_micros),0) t FROM earnings WHERE song_id IS NULL').t;
   const owed = contributors.reduce((a, c) => a + c.owed, 0);
-  return { contributors, total, owed, unallocated, unmatched, underSplitSongs: songs };
+  return { contributors: payouts(), total: usd(total), owed: usd(owed), unallocated: usd(total - owed),
+           unmatched: usd(unmatched), underSplitSongs };
 }
 
 function advances() {
   // Earnings from one source are a shared pool: advances recoup in date order, so
-  // an earlier advance uses up earnings before a later one can claim them.
+  // an earlier advance uses up earnings before a later one can claim them. (Integer micros throughout.)
   const asc = all('SELECT * FROM advances ORDER BY date ASC, id ASC');
   const groups = new Map();
   for (const a of asc) {
-    a.earnedSince = get(`SELECT COALESCE(SUM(e.amount),0) t FROM earnings e JOIN statements st ON st.id = e.statement_id
+    a.earnedSince = get(`SELECT COALESCE(SUM(e.amount_micros),0) t FROM earnings e JOIN statements st ON st.id = e.statement_id
                          WHERE lower(st.source) = lower(?) AND (? IS NULL OR e.period IS NULL OR e.period >= substr(?,1,7))`,
       a.source, a.date, a.date).t;
     const key = a.source.toLowerCase();
@@ -351,23 +433,25 @@ function advances() {
       // earnings dated before this advance were the first to be used up by earlier advances
       const preDated = poolStart - a.earnedSince;
       const available = Math.max(0, a.earnedSince - Math.max(0, consumed - preDated));
-      a.recouped = Math.min(a.amount, available);
-      a.balance = a.amount - a.recouped;
+      a.recouped = Math.min(a.amount_micros, available);
+      a.balance = a.amount_micros - a.recouped;
       consumed += a.recouped;
     }
   }
-  return asc.reverse();
+  return asc.reverse().map((a) => ({ id: a.id, source: a.source, amount: usd(a.amount_micros), date: a.date, notes: a.notes,
+    earnedSince: usd(a.earnedSince), recouped: usd(a.recouped), balance: usd(a.balance) }));
 }
 
 function payments() {
   const today = new Date().toISOString().slice(0, 10);
   return all('SELECT * FROM payments ORDER BY COALESCE(received_date, expected_date) DESC, id DESC').map((p) => {
     let status = 'pending';
-    if (p.received_amount != null) {
-      const diff = (p.expected_amount ?? p.received_amount) - p.received_amount;
-      status = p.expected_amount == null || Math.abs(diff) < 0.005 ? 'received' : diff > 0 ? 'short' : 'over';
+    if (p.received_micros != null) {
+      const diff = (p.expected_micros ?? p.received_micros) - p.received_micros;
+      status = p.expected_micros == null || Math.abs(diff) < 5000 ? 'received' : diff > 0 ? 'short' : 'over'; // within half a cent counts as paid in full
     } else if (p.expected_date && p.expected_date < today) status = 'overdue';
-    return { ...p, status };
+    return { id: p.id, source: p.source, expected_amount: usd(p.expected_micros), expected_date: p.expected_date,
+             received_amount: usd(p.received_micros), received_date: p.received_date, notes: p.notes, status };
   });
 }
 
@@ -438,15 +522,15 @@ route('GET', '/api/payouts', () => payouts());
 route('GET', '/api/payouts/summary', () => payoutSummary());
 
 route('GET', '/api/statements', () => all(`
-  SELECT st.*, COALESCE(SUM(e.amount),0) total,
+  SELECT st.*, COALESCE(SUM(e.amount_micros),0) total,
          SUM(CASE WHEN e.song_id IS NULL THEN 1 ELSE 0 END) unmatched
   FROM statements st LEFT JOIN earnings e ON e.statement_id = st.id
-  GROUP BY st.id ORDER BY st.id DESC`));
+  GROUP BY st.id ORDER BY st.id DESC`).map((st) => ({ ...st, total: usd(st.total) })));
 route('POST', '/api/statements/import', ({ body }) => importStatement(body));
 route('DELETE', '/api/statements/:id', ({ params }) => { runOne('Statement', 'DELETE FROM statements WHERE id=?', params.id); return { ok: true }; });
 route('GET', '/api/unmatched', () => all(`
-  SELECT COALESCE(raw_title, raw_isrc, 'Unknown') name, raw_title, raw_isrc, COUNT(*) rows, SUM(amount) total
-  FROM earnings WHERE song_id IS NULL GROUP BY raw_title, raw_isrc ORDER BY total DESC`));
+  SELECT COALESCE(raw_title, raw_isrc, 'Unknown') name, raw_title, raw_isrc, COUNT(*) rows, SUM(amount_micros) total
+  FROM earnings WHERE song_id IS NULL GROUP BY raw_title, raw_isrc ORDER BY total DESC`).map((u) => ({ ...u, total: usd(u.total) })));
 route('POST', '/api/unmatched/assign', ({ body }) => {
   const sid = requireNum(body.song_id, 'song_id');
   if (!get('SELECT 1 FROM songs WHERE id=?', sid)) throw notFound('Song');
@@ -459,16 +543,16 @@ route('GET', '/api/payments', () => payments());
 route('POST', '/api/payments', ({ body }) => {
   const exp = num(body.expected_amount), rec = num(body.received_amount);
   if (exp == null && rec == null) throw bad('Provide an expected or received amount');
-  return { id: Number(run('INSERT INTO payments (source, expected_amount, expected_date, received_amount, received_date, notes) VALUES (?,?,?,?,?,?)',
-    requireStr(body.source, 'source'), exp, str(body.expected_date), rec, str(body.received_date), str(body.notes)).lastInsertRowid) };
+  return { id: Number(run('INSERT INTO payments (source, expected_micros, expected_date, received_micros, received_date, notes) VALUES (?,?,?,?,?,?)',
+    requireStr(body.source, 'source'), exp == null ? null : toMicros(exp), str(body.expected_date), rec == null ? null : toMicros(rec), str(body.received_date), str(body.notes)).lastInsertRowid) };
 });
 route('PUT', '/api/payments/:id', ({ params, body }) => {
   const cur = get('SELECT * FROM payments WHERE id=?', params.id);
   if (!cur) throw notFound('Payment');
   // only fields present in the body change; an explicit null clears received_*
   const has = (k) => Object.hasOwn(body, k);
-  run('UPDATE payments SET received_amount=?, received_date=?, notes=? WHERE id=?',
-    has('received_amount') ? num(body.received_amount) : cur.received_amount,
+  run('UPDATE payments SET received_micros=?, received_date=?, notes=? WHERE id=?',
+    has('received_amount') ? (num(body.received_amount) == null ? null : toMicros(num(body.received_amount))) : cur.received_micros,
     has('received_date') ? str(body.received_date) : cur.received_date,
     str(body.notes) ?? cur.notes, params.id);
   return { ok: true };
@@ -477,13 +561,13 @@ route('DELETE', '/api/payments/:id', ({ params }) => { runOne('Payment', 'DELETE
 
 route('GET', '/api/advances', () => advances());
 route('POST', '/api/advances', ({ body }) => ({
-  id: Number(run('INSERT INTO advances (source, amount, date, notes) VALUES (?,?,?,?)',
-    requireStr(body.source, 'source'), requireNum(body.amount, 'amount'), str(body.date), str(body.notes)).lastInsertRowid),
+  id: Number(run('INSERT INTO advances (source, amount_micros, date, notes) VALUES (?,?,?,?)',
+    requireStr(body.source, 'source'), toMicros(requireNum(body.amount, 'amount')), str(body.date), str(body.notes)).lastInsertRowid),
 }));
 route('DELETE', '/api/advances/:id', ({ params }) => { runOne('Advance', 'DELETE FROM advances WHERE id=?', params.id); return { ok: true }; });
 
 route('GET', '/api/export/earnings.csv', () => {
-  const rows = all(`SELECT COALESCE(s.title, e.raw_title) title, e.raw_isrc isrc, e.platform, e.territory, e.period, e.units, e.amount, st.source
+  const rows = all(`SELECT COALESCE(s.title, e.raw_title) title, e.raw_isrc isrc, e.platform, e.territory, e.period, e.units, e.amount_micros, st.source
                     FROM earnings e JOIN statements st ON st.id = e.statement_id LEFT JOIN songs s ON s.id = e.song_id
                     ORDER BY e.period, title`);
   // Text starting with = + - @ (or tab/CR) is executed as a formula by Excel/Sheets, and titles, sources etc.
@@ -495,7 +579,7 @@ route('GET', '/api/export/earnings.csv', () => {
     return /[",\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
   };
   const head = 'title,isrc,platform,territory,period,units,amount,source';
-  return { __csv: [head, ...rows.map((r) => [r.title, r.isrc, r.platform, r.territory, r.period, r.units, r.amount, r.source].map(esc).join(','))].join('\n') };
+  return { __csv: [head, ...rows.map((r) => [...[r.title, r.isrc, r.platform, r.territory, r.period].map(esc), r.units, microsToString(r.amount_micros), esc(r.source)].join(','))].join('\n') };
 });
 
 function relink() {

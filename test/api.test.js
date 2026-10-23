@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 
 process.env.DB_FILE = ':memory:';
-const { server, parseMoney, parseCsv, normPeriod, detectDateOrder } = await import('../server.js');
+const { server, parseMoney, parseMoneyMicros, microsToString, parseCsv, normPeriod, detectDateOrder } = await import('../server.js');
 
 let base;
 before(async () => {
@@ -25,7 +25,7 @@ test('parseMoney: sub-cent decimals are not read as whole numbers', () => {
   assert.equal(parseMoney('0.00456'), 0.00456);
   assert.equal(parseMoney('0.005'), 0.005);
   assert.equal(parseMoney('0,00456'), 0.00456);
-  assert.equal(parseMoney('$0.0123456'), 0.0123456);
+  assert.equal(parseMoney('$0.012345'), 0.012345);
 });
 
 test('parseMoney: common formats', () => {
@@ -495,4 +495,136 @@ test('malformed split entries are 400s, not 409s or 500s', async () => {
     const r = await call('PUT', `/api/songs/${song.id}/splits`, { splits });
     assert.equal(r.status, 400, JSON.stringify(splits));
   }
+});
+
+// ---------- integer money ----------
+
+import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
+import os from 'node:os';
+import nodePath from 'node:path';
+
+test('parseMoneyMicros is exact and rounds past the sixth decimal', () => {
+  assert.equal(parseMoneyMicros('0.00456'), 4560);
+  assert.equal(parseMoneyMicros('1,234.50'), 1234500000);
+  assert.equal(parseMoneyMicros('0.1'), 100000);
+  assert.equal(parseMoneyMicros('0.0000004'), 0);
+  assert.equal(parseMoneyMicros('0.0000005'), 1);
+  assert.equal(parseMoneyMicros('0.0000015'), 2);
+  assert.equal(parseMoneyMicros('(2.50)'), -2500000);
+  assert.equal(parseMoneyMicros('-0.000001'), -1);
+  assert.ok(Number.isNaN(parseMoneyMicros('99999999999999999999')), 'beyond the safe range');
+  assert.ok(Number.isNaN(parseMoneyMicros('')));
+});
+
+test('microsToString has no float artefacts', () => {
+  assert.equal(microsToString(1234500000), '1234.5');
+  assert.equal(microsToString(4560), '0.00456');
+  assert.equal(microsToString(-3500000), '-3.5');
+  assert.equal(microsToString(0), '0');
+  assert.equal(microsToString(1), '0.000001');
+});
+
+test('many small amounts add up exactly, in totals and in the export', async () => {
+  const rows = Array.from({ length: 1000 }, (_, i) => `Float ${i % 7},0.1,2036-01`).join('\n');
+  await call('POST', '/api/statements/import', { source: 'FloatSrc', csv: `Track,Earnings,Sale Month\n${rows}\n` });
+  const jan = (await call('GET', '/api/dashboard?from=2036-01&to=2036-01')).data;
+  assert.equal(jan.total, 100, `1000 x 0.1 should be exactly 100, got ${jan.total}`);
+  const exp = await fetch(base + '/api/export/earnings.csv').then((r) => r.text());
+  assert.ok(exp.split('\n').filter((l) => l.startsWith('Float ')).every((l) => l.split(',')[6] === '0.1'));
+});
+
+test('three-way splits stay exact and nothing is lost or invented', async () => {
+  const cs = [];
+  for (const n of ['T1', 'T2', 'T3']) cs.push((await call('POST', '/api/contributors', { name: `Third ${n}` })).data.id);
+  const { data: song } = await call('POST', '/api/songs', { title: 'Thirds 2037' });
+  await call('PUT', `/api/songs/${song.id}/splits`, { splits: cs.map((id, i) => ({ contributor_id: id, pct: i < 2 ? 33.33 : 33.34 })) });
+  await call('POST', '/api/statements/import', { source: 'ThirdSrc', csv: 'Track,Earnings,Sale Month\nThirds 2037,100.00,2037-01\nThirds 2037,0.01,2037-01\n' });
+  const { data } = await call('GET', '/api/payouts/summary');
+  const mine = data.contributors.filter((c) => cs.includes(c.id));
+  assert.deepEqual(mine.map((c) => c.owed).sort((a, b) => a - b), [33.333333, 33.333333, 33.343334]);
+  assert.ok(Math.abs(data.owed + data.unallocated - data.total) < 1e-9);
+  // in whole micros the books balance exactly
+  const m = (x) => Math.round(x * 1e6);
+  assert.equal(m(data.owed) + m(data.unallocated), m(data.total));
+});
+
+test('payments and advances keep sub-cent precision and status tolerance', async () => {
+  const { data: p } = await call('POST', '/api/payments', { source: 'MoneyPay', expected_amount: 10.005, received_amount: 10.005 });
+  let row = (await call('GET', '/api/payments')).data.find((x) => x.id === p.id);
+  assert.equal(row.expected_amount, 10.005);
+  assert.equal(row.status, 'received');
+  await call('PUT', `/api/payments/${p.id}`, { received_amount: 10.0 }); // 0.005 short = exactly half a cent
+  row = (await call('GET', '/api/payments')).data.find((x) => x.id === p.id);
+  assert.equal(row.status, 'short');
+  await call('PUT', `/api/payments/${p.id}`, { received_amount: 10.0051 });
+  row = (await call('GET', '/api/payments')).data.find((x) => x.id === p.id);
+  assert.equal(row.status, 'received', 'within half a cent counts as paid in full');
+  assert.equal((await call('POST', '/api/payments', { source: 'x', expected_amount: 1e15 })).status, 400);
+});
+
+test('a database with dollar REAL columns is migrated to integer micros', () => {
+  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'rt-migrate-'));
+  const file = nodePath.join(dir, 'old.db');
+  const old = new DatabaseSync(file);
+  old.exec(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE songs (id INTEGER PRIMARY KEY, title TEXT NOT NULL, isrc TEXT, release TEXT, notes TEXT);
+    CREATE TABLE contributors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT);
+    CREATE TABLE splits (song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+      contributor_id INTEGER NOT NULL REFERENCES contributors(id) ON DELETE CASCADE, pct REAL NOT NULL, PRIMARY KEY (song_id, contributor_id));
+    CREATE TABLE statements (id INTEGER PRIMARY KEY, source TEXT NOT NULL, filename TEXT,
+      imported_at TEXT NOT NULL DEFAULT (datetime('now')), row_count INTEGER DEFAULT 0);
+    CREATE TABLE earnings (id INTEGER PRIMARY KEY, statement_id INTEGER NOT NULL REFERENCES statements(id) ON DELETE CASCADE,
+      song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL, raw_title TEXT, raw_isrc TEXT, platform TEXT, territory TEXT,
+      period TEXT, units INTEGER DEFAULT 0, amount REAL NOT NULL);
+    CREATE INDEX idx_earn_song ON earnings(song_id);
+    CREATE TABLE payments (id INTEGER PRIMARY KEY, source TEXT NOT NULL, expected_amount REAL, expected_date TEXT,
+      received_amount REAL, received_date TEXT, notes TEXT);
+    CREATE TABLE advances (id INTEGER PRIMARY KEY, source TEXT NOT NULL, amount REAL NOT NULL, date TEXT, notes TEXT);
+    INSERT INTO songs (id, title) VALUES (1, 'Old Song');
+    INSERT INTO contributors (id, name) VALUES (1, 'Old Pal');
+    INSERT INTO splits VALUES (1, 1, 50);
+    INSERT INTO statements (id, source, row_count) VALUES (1, 'OldSrc', 3);
+    INSERT INTO earnings (statement_id, song_id, raw_title, period, units, amount) VALUES
+      (1, 1, 'Old Song', '2024-01', 10, 0.1), (1, 1, 'Old Song', '2024-01', 10, 0.2), (1, NULL, 'Stray', '2024-02', 1, 1234.5);
+    INSERT INTO payments (source, expected_amount, expected_date, received_amount) VALUES ('OldSrc', 100.25, '2024-03-01', 100.25);
+    INSERT INTO advances (source, amount, date) VALUES ('OldSrc', 500, '2024-01-01');
+  `);
+  old.close();
+
+  const script = `
+    const { server } = await import(${JSON.stringify(new URL('../server.js', import.meta.url).href)});
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const base = 'http://127.0.0.1:' + server.address().port;
+    const get = (p) => fetch(base + p).then((r) => r.json());
+    console.log(JSON.stringify({ dash: await get('/api/dashboard'), pay: await get('/api/payments'),
+      adv: await get('/api/advances'), songs: await get('/api/songs'), payouts: await get('/api/payouts/summary') }));
+    process.exit(0);`;
+  const run = () => spawnSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', script], {
+    env: { ...process.env, DB_FILE: file }, encoding: 'utf8' });
+  const first = run();
+  assert.equal(first.status, 0, first.stderr);
+  const out = JSON.parse(first.stdout);
+  assert.equal(out.dash.total, 1234.8, 'floats converted without drift');
+  assert.equal(out.dash.unmatched.t, 1234.5);
+  assert.equal(out.pay[0].expected_amount, 100.25);
+  assert.equal(out.pay[0].status, 'received');
+  assert.equal(out.adv[0].amount, 500);
+  assert.equal(out.adv[0].recouped, 500);
+  assert.equal(out.songs[0].earned, 0.3);
+  assert.equal(out.payouts.contributors[0].owed, 0.15);
+
+  // idempotent: opening the migrated file again changes nothing
+  const second = run();
+  assert.equal(second.status, 0, second.stderr);
+  assert.deepEqual(JSON.parse(second.stdout), out);
+
+  const check = new DatabaseSync(file);
+  const cols = check.prepare('PRAGMA table_info(earnings)').all().map((c) => c.name);
+  assert.ok(cols.includes('amount_micros') && !cols.includes('amount'));
+  assert.equal(check.prepare('SELECT typeof(amount_micros) t FROM earnings LIMIT 1').get().t, 'integer');
+  assert.equal(check.prepare("SELECT count(*) c FROM sqlite_master WHERE name = 'idx_earn_song'").get().c, 1, 'index recreated');
+  check.close();
 });
