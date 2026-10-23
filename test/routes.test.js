@@ -189,3 +189,30 @@ test('malformed split entries are 400s, not 409s or 500s', async () => {
     assert.equal(r.status, 400, JSON.stringify(splits));
   }
 });
+
+// ---------- unmatched reasons ----------
+
+test('/api/unmatched says why each group is unmatched, and assigning clears it', async () => {
+  await call('POST', '/api/songs', { title: 'Why Twin' });
+  await call('POST', '/api/songs', { title: 'Why Twin' });
+  const csv = 'Track,Earnings,Sale Month\nWhy Twin,4.00,2042-01\nWhy Nobody,6.00,2042-01\n';
+  await call('POST', '/api/statements/import', { source: 'WhySrc', csv });
+
+  const list = (await call('GET', '/api/unmatched')).data;
+  const twin = list.find((u) => u.raw_title === 'Why Twin'), nobody = list.find((u) => u.raw_title === 'Why Nobody');
+  assert.equal(twin.reason, 'ambiguous');
+  assert.equal(nobody.reason, 'none');
+
+  const { data: song } = await call('POST', '/api/songs', { title: 'Why Chosen' });
+  await call('POST', '/api/unmatched/assign', { song_id: song.id, raw_title: twin.raw_title, raw_isrc: twin.raw_isrc });
+  assert.ok(!(await call('GET', '/api/unmatched')).data.some((u) => u.raw_title === 'Why Twin'));
+  assert.equal(app.db.prepare("SELECT match_reason FROM earnings WHERE raw_title = 'Why Twin'").get().match_reason, null);
+});
+
+test('rows left unmatched by a deleted song are reported as none', async () => {
+  const { data: gone } = await call('POST', '/api/songs', { title: 'Why Gone' });
+  await call('POST', '/api/statements/import', { source: 'GoneSrc', csv: 'Track,Earnings,Sale Month\nWhy Gone,2.00,2042-02\n' });
+  await call('DELETE', `/api/songs/${gone.id}`);
+  const row = (await call('GET', '/api/unmatched')).data.find((u) => u.raw_title === 'Why Gone');
+  assert.equal(row.reason, 'none');
+});
