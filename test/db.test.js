@@ -75,6 +75,37 @@ test('a database with dollar REAL columns is migrated to integer micros', async 
   check.close();
 });
 
+test('a database without match_reason gains the column and keeps its rows', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt-reason-'));
+  const file = path.join(dir, 'prev.db');
+  const prev = new DatabaseSync(file);
+  prev.exec(`
+    CREATE TABLE statements (id INTEGER PRIMARY KEY, source TEXT NOT NULL, filename TEXT,
+      imported_at TEXT NOT NULL DEFAULT (datetime('now')), row_count INTEGER DEFAULT 0, content_hash TEXT);
+    CREATE TABLE earnings (id INTEGER PRIMARY KEY, statement_id INTEGER NOT NULL REFERENCES statements(id) ON DELETE CASCADE,
+      song_id INTEGER, raw_title TEXT, raw_isrc TEXT, platform TEXT, territory TEXT,
+      period TEXT, units INTEGER DEFAULT 0, amount_micros INTEGER NOT NULL);
+    INSERT INTO statements (id, source) VALUES (1, 'PrevSrc');
+    INSERT INTO earnings (statement_id, raw_title, amount_micros) VALUES (1, 'Kept', 2500000);
+  `);
+  prev.close();
+
+  for (let i = 0; i < 2; i++) { // second open proves the migration is idempotent
+    const db = openDb(file);
+    const cols = db.prepare('PRAGMA table_info(earnings)').all().map((c) => c.name);
+    assert.ok(cols.includes('match_reason'));
+    const row = db.prepare('SELECT raw_title, amount_micros, match_reason FROM earnings').get();
+    assert.deepEqual({ ...row }, { raw_title: 'Kept', amount_micros: 2500000, match_reason: null });
+    db.close();
+  }
+});
+
+test('a fresh database has match_reason', () => {
+  const db = openDb(':memory:');
+  assert.ok(db.prepare('PRAGMA table_info(earnings)').all().some((c) => c.name === 'match_reason'));
+  db.close();
+});
+
 test('a database without mlc_song_code gains the column and keeps its songs', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt-mlc-'));
   const file = path.join(dir, 'prev.db');

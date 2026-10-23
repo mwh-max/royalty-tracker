@@ -149,7 +149,7 @@ const pages = {
       actions(btn('Delete', confirmed('Delete this statement and its earnings?', act(() => api('DELETE', `/statements/${s.id}`))), 'link danger'))));
     const urows = unmatched.map((u) => {
       const sel = h('select', null, h('option', { value: '' }, 'Assign to…'), songs.map((s) => h('option', { value: s.id }, s.title)));
-      return h('tr', null, td(u.name), td(u.raw_isrc || ''), td(int(u.rows), true), td(money(u.total), true), actions(sel,
+      return h('tr', null, td(u.name), td(u.raw_isrc || ''), td(u.reason === 'ambiguous' ? 'Several songs match' : 'No song matches'), td(int(u.rows), true), td(money(u.total), true), actions(sel,
         btn('Assign', act(async () => {
           if (!sel.value) throw new Error('Pick a song first');
           const r = await api('POST', '/unmatched/assign', { song_id: Number(sel.value), raw_title: u.raw_title, raw_isrc: u.raw_isrc });
@@ -159,7 +159,7 @@ const pages = {
     return [h('h2', null, 'Import statement'), form,
       table(['Source', 'File', 'Imported', 'Rows#', 'Total#', '', ''], srows, 'No statements imported.'),
       h('h2', null, 'Unmatched earnings'),
-      table(['Track', 'ISRC', 'Rows#', 'Total#', ''], urows, 'Everything is matched.')];
+      table(['Track', 'ISRC', 'Why', 'Rows#', 'Total#', ''], urows, 'Everything is matched.')];
   },
 
   async payments() {
