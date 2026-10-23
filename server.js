@@ -142,16 +142,39 @@ export const parseMoney = (s) => {
   return neg ? -n : n;
 };
 
-// normalise to YYYY-MM when possible
-const normPeriod = (s) => {
+// Day-first vs month-first dates (05/03/2025) can't be told apart from one value, so the
+// order is decided per file: any value with a first or second part above 12 settles it.
+const DATE_PARTS = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/;
+export function detectDateOrder(values) {
+  let dmy = false, mdy = false, any = false;
+  for (const v of values) {
+    const m = String(v ?? '').trim().match(DATE_PARTS);
+    if (!m) continue;
+    any = true;
+    if (+m[1] > 12) dmy = true;
+    if (+m[2] > 12) mdy = true;
+  }
+  if (dmy && mdy) throw bad('Period column mixes day-first and month-first dates');
+  if (dmy) return 'dmy';
+  if (mdy) return 'mdy';
+  return any ? 'ambiguous' : null;
+}
+
+// normalise to YYYY-MM when possible; order ('mdy' | 'dmy') only matters for D/M/YYYY-style dates
+export const normPeriod = (s, order = 'mdy') => {
   if (!s) return null;
   s = String(s).trim();
+  const ym = (y, mo) => `${y}-${String(mo).padStart(2, '0')}`;
+  const validMonth = (mo) => +mo >= 1 && +mo <= 12;
   let m = s.match(/^(\d{4})[-/](\d{1,2})/);
-  if (m) return `${m[1]}-${m[2].padStart(2, '0')}`;
+  if (m && validMonth(m[2])) return ym(m[1], m[2]);
   m = s.match(/^(\d{1,2})[-/](\d{4})$/);
-  if (m) return `${m[2]}-${m[1].padStart(2, '0')}`;
-  m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/); // assume M/D/YYYY
-  if (m) return `${m[3]}-${m[1].padStart(2, '0')}`;
+  if (m && validMonth(m[1])) return ym(m[2], m[1]);
+  m = s.match(DATE_PARTS);
+  if (m) {
+    const mo = order === 'dmy' ? m[2] : m[1];
+    if (validMonth(mo)) return ym(m[3], mo);
+  }
   const d = new Date(s + ' 1');
   if (!isNaN(d)) return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
   const d2 = new Date(s);
@@ -171,13 +194,25 @@ function matchSong(title, isrc) {
   return null;
 }
 
-function importStatement({ source, filename, csv, force }) {
+function importStatement({ source, filename, csv, force, dateOrder }) {
   if (!source) throw bad('source is required');
   const rows = parseCsv(csv || '');
   if (rows.length < 2) throw bad('CSV needs a header row and at least one data row');
   const map = mapHeaders(rows[0]);
   if (map.amount == null) throw bad(`Could not find an amount column. Headers seen: ${rows[0].join(', ')}`);
   if (map.title == null && map.isrc == null) throw bad('Need a title or ISRC column');
+  if (dateOrder != null && dateOrder !== 'mdy' && dateOrder !== 'dmy') throw bad("dateOrder must be 'mdy' or 'dmy'");
+  let order = dateOrder;
+  if (map.period != null) {
+    const detected = detectDateOrder(rows.slice(1).map((r) => r[map.period]));
+    if (detected === 'ambiguous' && !order) {
+      throw bad("Period dates like 05/03/2025 could be day-first or month-first. Re-import with dateOrder: 'dmy' or 'mdy'.");
+    }
+    if (detected && detected !== 'ambiguous' && order && order !== detected) {
+      throw bad(`dateOrder '${order}' contradicts the file, whose dates are ${detected === 'dmy' ? 'day-first' : 'month-first'}`);
+    }
+    order = order || detected || 'mdy';
+  }
   const hash = crypto.createHash('sha256').update(source.toLowerCase()).update('\0').update(csv).digest('hex');
   const dupe = get('SELECT id, imported_at FROM statements WHERE content_hash = ?', hash);
   if (dupe && !force) {
@@ -200,7 +235,7 @@ function importStatement({ source, filename, csv, force }) {
       ins.run(sid, songId, title, isrc,
         map.platform != null ? str(r[map.platform]) : null,
         map.territory != null ? str(r[map.territory]) : null,
-        map.period != null ? normPeriod(r[map.period]) : null,
+        map.period != null ? normPeriod(r[map.period], order) : null,
         units, amount);
     }
     const count = get('SELECT COUNT(*) c FROM earnings WHERE statement_id = ?', sid).c;
@@ -425,10 +460,28 @@ function relink() {
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+// Guards against other websites driving the API from the user's browser: a Host check stops DNS
+// rebinding, an Origin check stops cross-site requests, and requiring a JSON content type forces
+// a CORS preflight (which this server never approves) for anything that writes.
+function guardRequest(req) {
+  const host = (req.headers.host || '').replace(/:\d+$/, '').toLowerCase();
+  if (!LOCAL_HOSTS.has(host)) throw new HttpError(403, 'Forbidden host');
+  const origin = req.headers.origin;
+  if (origin && origin !== `http://${req.headers.host}`) throw new HttpError(403, 'Cross-origin requests are not allowed');
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+    if (!/^application\/json\s*(;|$)/i.test(req.headers['content-type'] || '')) {
+      throw new HttpError(415, 'Content-Type must be application/json');
+    }
+  }
+}
+
 export const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname.startsWith('/api/')) {
+      guardRequest(req);
       for (const r of routes) {
         if (r.method !== req.method) continue;
         const m = url.pathname.match(r.re);

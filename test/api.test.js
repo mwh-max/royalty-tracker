@@ -1,8 +1,9 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 
 process.env.DB_FILE = ':memory:';
-const { server, parseMoney, parseCsv } = await import('../server.js');
+const { server, parseMoney, parseCsv, normPeriod, detectDateOrder } = await import('../server.js');
 
 let base;
 before(async () => {
@@ -14,6 +15,7 @@ after(() => server.close());
 const call = async (method, path, body) => {
   const res = await fetch(base + path, {
     method, body: body === undefined ? undefined : JSON.stringify(body),
+    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
   });
   const data = await res.json();
   return { status: res.status, data };
@@ -135,4 +137,114 @@ test('payment update can explicitly clear received fields', async () => {
 test('updating a missing payment returns 404', async () => {
   const { status } = await call('PUT', '/api/payments/999999', { notes: 'x' });
   assert.equal(status, 404);
+});
+
+// ---------- cross-site protection ----------
+
+const raw = (method, path, { headers = {}, body } = {}) =>
+  new Promise((resolve, reject) => {
+    const port = server.address().port;
+    const req = http.request({ host: '127.0.0.1', port, method, path, headers }, (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+
+test('writes without a JSON content type are rejected (no-preflight cross-site form/fetch)', async () => {
+  const before = (await call('GET', '/api/contributors')).data.length;
+  for (const ct of ['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x', undefined]) {
+    const r = await raw('POST', '/api/contributors', { headers: ct ? { 'Content-Type': ct } : {}, body: '{"name":"evil"}' });
+    assert.equal(r.status, 415, `content type ${ct}`);
+  }
+  assert.equal((await call('GET', '/api/contributors')).data.length, before);
+});
+
+test('requests from a foreign Origin are rejected', async () => {
+  const r = await raw('POST', '/api/contributors', {
+    headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' }, body: '{"name":"evil"}',
+  });
+  assert.equal(r.status, 403);
+  const g = await raw('GET', '/api/contributors', { headers: { Origin: 'https://evil.example' } });
+  assert.equal(g.status, 403);
+});
+
+test('requests with a non-local Host header are rejected (DNS rebinding)', async () => {
+  const r = await raw('GET', '/api/contributors', { headers: { Host: 'evil.example' } });
+  assert.equal(r.status, 403);
+});
+
+test('same-origin JSON requests still work', async () => {
+  const port = server.address().port;
+  const r = await raw('POST', '/api/contributors', {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', Origin: `http://127.0.0.1:${port}` },
+    body: '{"name":"ok"}',
+  });
+  assert.equal(r.status, 200);
+});
+
+// ---------- period / date handling ----------
+
+test('normPeriod: unambiguous formats', () => {
+  assert.equal(normPeriod('2025-01'), '2025-01');
+  assert.equal(normPeriod('2025/3/15'), '2025-03');
+  assert.equal(normPeriod('03/2025'), '2025-03');
+  assert.equal(normPeriod('Jan 2025'), '2025-01');
+});
+
+test('normPeriod: day-first vs month-first', () => {
+  assert.equal(normPeriod('05/03/2025', 'mdy'), '2025-05');
+  assert.equal(normPeriod('05/03/2025', 'dmy'), '2025-03');
+  assert.equal(normPeriod('25.03.2025', 'dmy'), '2025-03');
+  assert.equal(normPeriod('03/25/2025', 'mdy'), '2025-03');
+});
+
+test('detectDateOrder', () => {
+  assert.equal(detectDateOrder(['25/03/2025', '01/04/2025']), 'dmy');
+  assert.equal(detectDateOrder(['03/25/2025', '04/01/2025']), 'mdy');
+  assert.equal(detectDateOrder(['01/03/2025', '02/03/2025']), 'ambiguous');
+  assert.equal(detectDateOrder(['2025-01', '2025-02']), null);
+  assert.throws(() => detectDateOrder(['25/03/2025', '03/25/2025']), /mixes/);
+});
+
+test('import detects day-first dates from the file', async () => {
+  const csv = 'Track,Earnings,Date\nDmyA,1.00,25/03/2025\nDmyB,1.00,05/03/2025\n';
+  const r = await call('POST', '/api/statements/import', { source: 'DmySrc', csv });
+  assert.equal(r.status, 200);
+  const export_ = await fetch(base + '/api/export/earnings.csv').then((x) => x.text());
+  const lines = export_.split('\n').filter((l) => l.startsWith('DmyA') || l.startsWith('DmyB'));
+  assert.equal(lines.length, 2);
+  for (const l of lines) assert.equal(l.split(',')[4], '2025-03', l);
+});
+
+test('import detects month-first dates from the file', async () => {
+  const csv = 'Track,Earnings,Date\nMdyA,1.00,03/25/2025\nMdyB,1.00,05/03/2025\n';
+  await call('POST', '/api/statements/import', { source: 'MdySrc', csv });
+  const export_ = await fetch(base + '/api/export/earnings.csv').then((x) => x.text());
+  const l = export_.split('\n').find((x) => x.startsWith('MdyB'));
+  assert.equal(l.split(',')[4], '2025-05');
+});
+
+test('import rejects fully ambiguous dates unless dateOrder is given', async () => {
+  const csv = 'Track,Earnings,Date\nAmbA,1.00,05/03/2025\n';
+  const r = await call('POST', '/api/statements/import', { source: 'AmbSrc', csv });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /dateOrder/);
+  assert.equal((await call('GET', '/api/statements')).data.filter((s) => s.source === 'AmbSrc').length, 0);
+
+  const ok = await call('POST', '/api/statements/import', { source: 'AmbSrc', csv, dateOrder: 'dmy' });
+  assert.equal(ok.status, 200);
+  const export_ = await fetch(base + '/api/export/earnings.csv').then((x) => x.text());
+  assert.equal(export_.split('\n').find((x) => x.startsWith('AmbA')).split(',')[4], '2025-03');
+});
+
+test('import rejects a dateOrder that contradicts the file, and invalid values', async () => {
+  const csv = 'Track,Earnings,Date\nConA,1.00,25/03/2025\n';
+  const r = await call('POST', '/api/statements/import', { source: 'ConSrc', csv, dateOrder: 'mdy' });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /contradicts/);
+  const bad = await call('POST', '/api/statements/import', { source: 'ConSrc', csv, dateOrder: 'ymd' });
+  assert.equal(bad.status, 400);
 });

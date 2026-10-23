@@ -14,3 +14,8 @@ Data is stored in `royalties.db` next to `server.js`. Try `sample-statement.csv`
 - **Dashboard**: earnings by period, track, platform, territory; date filter; CSV export.
 - **Payments**: expected vs. received (pending/overdue/short), advances with recoupment against same-named sources.
 - **Payouts**: each contributor's share of earnings from their splits.
+
+## API notes
+
+- Requests must come from localhost (`Host`/`Origin` are checked), and `POST`/`PUT` bodies must be sent as `Content-Type: application/json`.
+- Statement import detects day-first vs month-first dates from the file. If every date is ambiguous (e.g. `05/03/2025`), the import is rejected until you pass `dateOrder: "dmy"` or `"mdy"`. Re-importing an identical statement needs `force: true`.
