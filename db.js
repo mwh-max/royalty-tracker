@@ -5,7 +5,8 @@ import { MICROS } from './parse.js';
 const SCHEMA = `
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS songs (
-  id INTEGER PRIMARY KEY, title TEXT NOT NULL, isrc TEXT, release TEXT, notes TEXT
+  id INTEGER PRIMARY KEY, title TEXT NOT NULL, isrc TEXT, release TEXT, notes TEXT,
+  mlc_song_code TEXT
 );
 CREATE TABLE IF NOT EXISTS contributors (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT
@@ -56,6 +57,10 @@ function migrate(db) {
   // databases created before duplicate detection lack content_hash
   if (!hasCol(db, 'statements', 'content_hash')) {
     db.exec('ALTER TABLE statements ADD COLUMN content_hash TEXT');
+  }
+  // the MLC's identifier for a work, needed for its bulk-match upload
+  if (!hasCol(db, 'songs', 'mlc_song_code')) {
+    db.exec('ALTER TABLE songs ADD COLUMN mlc_song_code TEXT');
   }
 
   // Older databases stored dollars as REAL (earnings.amount, payments.*_amount, advances.amount);

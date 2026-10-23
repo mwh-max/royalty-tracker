@@ -89,26 +89,39 @@ const pages = {
   },
 
   async songs() {
-    const [songs, contribs, ready] = await Promise.all([api('GET', '/songs'), api('GET', '/contributors'), api('GET', '/composition/readiness')]);
+    const [songs, contribs, ready, mlc] = await Promise.all([api('GET', '/songs'), api('GET', '/contributors'), api('GET', '/composition/readiness'), api('GET', '/mlc/bulk-match')]);
     const add = h('form', { class: 'row', onsubmit: act(async (e) => {
       e.preventDefault();
       const r = await api('POST', '/songs', formData(e.target));
       say(r.linked ? `Added. Linked ${r.linked} earnings rows.` : 'Added.');
     }) },
     field('Title', h('input', { name: 'title', required: true })), field('ISRC', h('input', { name: 'isrc' })),
-    field('Release', h('input', { name: 'release' })), h('button', { class: 'primary' }, 'Add song'));
+    field('Release', h('input', { name: 'release' })), field('MLC Song Code', h('input', { name: 'mlc_song_code' })),
+    h('button', { class: 'primary' }, 'Add song'));
     const rows = songs.map((s) => h('tr', null,
-      td(s.title), td(s.isrc || ''), td(money(s.earned), true),
+      td(s.title), td(s.isrc || ''), td(s.mlc_song_code || ''), td(money(s.earned), true),
       td(s.splits.length ? `${s.splits.map((x) => `${x.name} ${x.pct}%`).join(', ')}${s.splitTotal < 99.9999 ? ` (${s.splitTotal}% assigned)` : ''}` : 'No splits'),
       td(s.compositionSplits.length ? `${s.compositionSplits.map((x) => `${x.name} ${x.pct}%`).join(', ')}${s.compositionSplitTotal < 99.9999 ? ` (${s.compositionSplitTotal}% assigned)` : ''}` : 'None'),
-      actions(btn('Splits', () => splitsDialog(s, contribs)), btn('Delete', confirmed(`Delete "${s.title}"? Its earnings become unmatched.`, act(() => api('DELETE', `/songs/${s.id}`))), 'link danger'))));
+      actions(btn('Splits', () => splitsDialog(s, contribs)),
+        btn('MLC code', act(async () => {
+          const code = prompt(`MLC Song Code for "${s.title}" (blank clears it)`, s.mlc_song_code ?? '');
+          if (code === null) return;
+          await api('PUT', `/songs/${s.id}`, { title: s.title, isrc: s.isrc, release: s.release, notes: s.notes, mlc_song_code: code });
+        })),
+        btn('Delete', confirmed(`Delete "${s.title}"? Its earnings become unmatched.`, act(() => api('DELETE', `/songs/${s.id}`))), 'link danger'))));
+    const mlcPanel = h('div', null,
+      h('h2', null, 'MLC bulk match'),
+      h('p', { class: 'muted' }, `${mlc.ready} recording${mlc.ready === 1 ? '' : 's'} ready to propose to the MLC (ISRC + MLC Song Code). ` +
+        'Upload the file through the MLC member portal; this app cannot see which of your recordings the MLC has left unmatched.'),
+      mlc.ready ? h('a', { href: '/api/export/mlc-bulk-match.csv', download: 'mlc-bulk-match.csv' }, 'Download CSV') : null,
+      mlc.skipped.length ? h('ul', null, mlc.skipped.map((s) => h('li', null, `${s.title}: ${s.reason}`))) : null);
     const notReady = ready.songs.filter((s) => s.status !== 'ready');
     const readyPanel = ready.total ? h('div', null,
       h('h2', null, 'Composition splits ready to register'),
       h('p', { class: 'muted' }, `${ready.ready} of ${ready.total} songs have composition splits that total 100% with no zero share. ` +
         'This checks shares only; the MLC also needs writer IPI numbers and publisher details, which this app does not store yet.'),
       notReady.length ? h('ul', null, notReady.map((s) => h('li', null, `${s.title}: ${s.message}`))) : null) : null;
-    return [h('h2', null, 'Catalog & splits'), add, table(['Title', 'ISRC', 'Earned#', 'Master splits', 'Composition splits', ''], rows, 'No songs yet.'), readyPanel];
+    return [h('h2', null, 'Catalog & splits'), add, table(['Title', 'ISRC', 'MLC code', 'Earned#', 'Master splits', 'Composition splits', ''], rows, 'No songs yet.'), readyPanel, mlcPanel];
   },
 
   async contributors() {

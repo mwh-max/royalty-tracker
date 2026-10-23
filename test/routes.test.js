@@ -254,6 +254,42 @@ test('split types are validated per type', async () => {
   assert.equal((await put({ type: 'composition', splits: [{ contributor_id: a.id, pct: 100 }] })).status, 200, 'the same contributor may hold both kinds, each up to 100%');
 });
 
+// ---------- MLC bulk match ----------
+
+test('songs store an MLC Song Code; PUT keeps it unless told otherwise', async () => {
+  const { data: s } = await call('POST', '/api/songs', { title: 'Code Keeper', isrc: 'USZZ12800001', mlc_song_code: ' M9001 ' });
+  const code = async () => (await call('GET', '/api/songs')).data.find((x) => x.id === s.id).mlc_song_code;
+  assert.equal(await code(), 'M9001', 'trimmed on save');
+  await call('PUT', `/api/songs/${s.id}`, { title: 'Code Keeper 2' });
+  assert.equal(await code(), 'M9001', 'an update that omits the field leaves it alone');
+  await call('PUT', `/api/songs/${s.id}`, { title: 'Code Keeper 2', mlc_song_code: 'M9002' });
+  assert.equal(await code(), 'M9002');
+  await call('PUT', `/api/songs/${s.id}`, { title: 'Code Keeper 2', mlc_song_code: null });
+  assert.equal(await code(), null, 'null clears it');
+});
+
+test('MLC bulk-match preview and CSV download', async () => {
+  await call('POST', '/api/songs', { title: 'Csv Ready', isrc: 'US-ZZ1-28-00002', mlc_song_code: 'M9101' });
+  const { data: bad } = await call('POST', '/api/songs', { title: 'Csv Bad Code', isrc: 'USZZ12800003', mlc_song_code: '=1+1' });
+
+  const preview = (await call('GET', '/api/mlc/bulk-match')).data;
+  assert.ok(preview.ready >= 1);
+  assert.ok(preview.skipped.some((s) => s.song_id === bad.id));
+
+  const res = await fetch(base + '/api/export/mlc-bulk-match.csv');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'text/csv; charset=utf-8');
+  assert.match(res.headers.get('content-disposition'), /filename="mlc-bulk-match\.csv"/);
+  const lines = (await res.text()).split('\n');
+  assert.equal(lines[0], 'ISRC,MLC Song Code');
+  assert.ok(lines.includes('USZZ12800002,M9101'), 'ISRC normalised to 12 characters');
+  assert.ok(!lines.some((l) => l.includes('=1+1')));
+
+  const earnings = await fetch(base + '/api/export/earnings.csv');
+  assert.equal(earnings.headers.get('content-type'), 'text/csv');
+  assert.match(earnings.headers.get('content-disposition'), /filename="earnings\.csv"/);
+});
+
 // ---------- composition readiness ----------
 
 test('/api/composition/readiness reports each song and updates as splits change', async () => {

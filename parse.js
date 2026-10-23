@@ -141,3 +141,10 @@ export const normPeriod = (s, order = 'mdy') => {
   if (!isNaN(d2)) return `${d2.getFullYear()}-${String(d2.getMonth() + 1).padStart(2, '0')}`;
   return s;
 };
+
+// An ISRC as the MLC's bulk upload wants it: exactly 12 letters/digits, upper-cased. Hyphens and
+// spaces (US-ZZ1-25-00001) are dropped first. null when the value can't be one.
+export const normIsrc = (s) => {
+  const t = String(s ?? '').replace(/[-\s]/g, '').toUpperCase();
+  return /^[A-Z0-9]{12}$/.test(t) ? t : null;
+};
