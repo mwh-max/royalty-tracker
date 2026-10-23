@@ -126,3 +126,46 @@ test('relinking skips ambiguous titles, and manual assign still works', async ()
   assert.equal(songs.find((s) => s.id === two.id).earned, 8);
   assert.equal(songs.find((s) => s.id === one.id).earned, 0);
 });
+
+// ---------- match_reason ----------
+
+const reasonOf = (title) => app.db.prepare('SELECT song_id, match_reason FROM earnings WHERE raw_title = ?').all(title)
+  .map((r) => ({ song_id: r.song_id, match_reason: r.match_reason }));
+
+test('import records why a row is unmatched: none, ambiguous, or matched', async () => {
+  await call('POST', '/api/songs', { title: 'Reason Twin' });
+  await call('POST', '/api/songs', { title: 'reason twin ' });
+  const { data: solo } = await call('POST', '/api/songs', { title: 'Reason Solo' });
+  const csv = 'Track,Earnings,Sale Month\nReason Twin,1.00,2040-01\nReason Solo,2.00,2040-01\nReason Nobody,3.00,2040-01\n';
+  await call('POST', '/api/statements/import', { source: 'ReasonSrc', csv });
+  assert.deepEqual(reasonOf('Reason Twin'), [{ song_id: null, match_reason: 'ambiguous' }]);
+  assert.deepEqual(reasonOf('Reason Solo'), [{ song_id: solo.id, match_reason: null }]);
+  assert.deepEqual(reasonOf('Reason Nobody'), [{ song_id: null, match_reason: 'none' }]);
+});
+
+test('relinking refreshes the reason: stays, clears when matched, and resolves when a twin goes', async () => {
+  const { data: t1 } = await call('POST', '/api/songs', { title: 'Shift Twin' });
+  await call('POST', '/api/songs', { title: 'Shift Twin' });
+  await call('POST', '/api/statements/import', {
+    source: 'ShiftSrc', csv: 'Track,Earnings,Sale Month\nShift Twin,1.00,2041-01\nShift Late,2.00,2041-01\n',
+  });
+  assert.equal(reasonOf('Shift Twin')[0].match_reason, 'ambiguous');
+  assert.equal(reasonOf('Shift Late')[0].match_reason, 'none');
+
+  // an unrelated song changes nothing, even when a stale NULL needs recomputing
+  app.db.exec("UPDATE earnings SET match_reason = NULL WHERE raw_title = 'Shift Twin'");
+  await call('POST', '/api/songs', { title: 'Shift Unrelated' });
+  assert.equal(reasonOf('Shift Twin')[0].match_reason, 'ambiguous');
+  assert.equal(reasonOf('Shift Late')[0].match_reason, 'none');
+
+  // the missing song arrives: linked, reason cleared
+  const { data: late } = await call('POST', '/api/songs', { title: 'Shift Late' });
+  assert.deepEqual(reasonOf('Shift Late'), [{ song_id: late.id, match_reason: null }]);
+
+  // one twin deleted: the other is now the only candidate
+  await call('DELETE', `/api/songs/${t1.id}`);
+  await call('POST', '/api/songs', { title: 'Shift Poke' });
+  const [row] = reasonOf('Shift Twin');
+  assert.ok(row.song_id && row.song_id !== t1.id);
+  assert.equal(row.match_reason, null);
+});
