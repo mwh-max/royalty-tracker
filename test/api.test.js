@@ -416,3 +416,32 @@ test('relinking skips ambiguous titles, and manual assign still works', async ()
   assert.equal(songs.find((s) => s.id === two.id).earned, 8);
   assert.equal(songs.find((s) => s.id === one.id).earned, 0);
 });
+
+// ---------- payouts ----------
+
+test('payout summary reports unallocated earnings instead of dropping them', async () => {
+  const { data: a } = await call('POST', '/api/contributors', { name: 'Payee A' });
+  const { data: b } = await call('POST', '/api/contributors', { name: 'Payee B' });
+  const { data: full } = await call('POST', '/api/songs', { title: 'Fully Split 2035' });
+  const { data: part } = await call('POST', '/api/songs', { title: 'Partly Split 2035' });
+  await call('POST', '/api/songs', { title: 'No Split 2035' });
+  await call('PUT', `/api/songs/${full.id}/splits`, { splits: [{ contributor_id: a.id, pct: 60 }, { contributor_id: b.id, pct: 40 }] });
+  await call('PUT', `/api/songs/${part.id}/splits`, { splits: [{ contributor_id: a.id, pct: 50 }] });
+  const csv = 'Track,Earnings,Sale Month\nFully Split 2035,100,2035-01\nPartly Split 2035,200,2035-01\nNo Split 2035,40,2035-01\nNobody 2035,10,2035-01\n';
+  await call('POST', '/api/statements/import', { source: 'PaySumSrc', csv });
+
+  const before = await call('GET', '/api/payouts');
+  assert.ok(Array.isArray(before.data), '/api/payouts keeps its original shape');
+
+  const { data } = await call('GET', '/api/payouts/summary');
+  const pa = data.contributors.find((c) => c.id === a.id), pb = data.contributors.find((c) => c.id === b.id);
+  assert.equal(pa.owed, 60 + 100);
+  assert.equal(pb.owed, 40);
+  const ps = data.underSplitSongs.find((s) => s.song_id === part.id);
+  assert.equal(ps.unallocated, 100);
+  assert.ok(!data.underSplitSongs.some((s) => s.song_id === full.id));
+  assert.ok(data.underSplitSongs.some((s) => s.title === 'No Split 2035' && s.unallocated === 40));
+  assert.equal(data.unmatched >= 10, true);
+  // every dollar is either owed to someone or reported as unallocated
+  assert.ok(Math.abs(data.owed + data.unallocated - data.total) < 1e-6, `${data.owed} + ${data.unallocated} != ${data.total}`);
+});

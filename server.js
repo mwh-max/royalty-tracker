@@ -299,8 +299,10 @@ function dashboard(q) {
            payments: pay, advances: adv.t, undatedPayments, undatedAdvances };
 }
 
+// Payouts are gross: each contributor's split of the earnings on matched songs. Nothing is netted
+// (the app records no payments *to* contributors), and share of a song not covered by its splits, plus
+// earnings not matched to any song, are reported as `unallocated` instead of silently disappearing.
 function payouts() {
-  // Each contributor's share of earnings on matched songs.
   const rows = all(`
     SELECT c.id, c.name, c.email,
            COALESCE(SUM(e.amount * sp.pct / 100.0),0) AS owed
@@ -315,6 +317,18 @@ function payouts() {
     LEFT JOIN earnings e ON e.song_id = s.id GROUP BY sp.song_id, sp.contributor_id`);
   for (const r of rows) r.songs = bySong.filter((x) => x.contributor_id === r.id);
   return rows;
+}
+
+function payoutSummary() {
+  const contributors = payouts();
+  const songs = songsWithStats().filter((s) => s.earned !== 0 && s.splitTotal < 99.9999)
+    .map((s) => ({ song_id: s.id, title: s.title, earned: s.earned, splitTotal: s.splitTotal,
+                   unallocated: s.earned * (100 - s.splitTotal) / 100 }));
+  const unmatched = get('SELECT COALESCE(SUM(amount),0) t FROM earnings WHERE song_id IS NULL').t;
+  const unallocated = songs.reduce((a, x) => a + x.unallocated, 0) + unmatched;
+  const total = get('SELECT COALESCE(SUM(amount),0) t FROM earnings').t;
+  const owed = contributors.reduce((a, c) => a + c.owed, 0);
+  return { contributors, total, owed, unallocated, unmatched, underSplitSongs: songs };
 }
 
 function advances() {
@@ -416,6 +430,7 @@ route('POST', '/api/contributors', ({ body }) => ({
 }));
 route('DELETE', '/api/contributors/:id', ({ params }) => { runOne('Contributor', 'DELETE FROM contributors WHERE id=?', params.id); return { ok: true }; });
 route('GET', '/api/payouts', () => payouts());
+route('GET', '/api/payouts/summary', () => payoutSummary());
 
 route('GET', '/api/statements', () => all(`
   SELECT st.*, COALESCE(SUM(e.amount),0) total,
