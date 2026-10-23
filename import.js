@@ -2,7 +2,7 @@
 import crypto from 'node:crypto';
 import { all, get, run, tx } from './db.js';
 import { HttpError, bad } from './errors.js';
-import { usd, str, parseCsv, mapHeaders, parseMoneyMicros, parseMoney, detectDateOrder, normPeriod } from './parse.js';
+import { usd, str, parseCsv, mapHeaders, parseMoneyMicros, parseMoney, detectDateOrder, normPeriod, titleSimilarity } from './parse.js';
 
 // Returns the song id for a title/ISRC pair, or null. A key shared by several songs is ambiguous:
 // guessing would put earnings on the wrong song, so it falls through (ISRC, then title) and is left
@@ -87,4 +87,16 @@ export function relink(db) {
     else run(db, `UPDATE earnings SET match_reason=? WHERE song_id IS NULL AND raw_title IS ? AND raw_isrc IS ?`, hit.ambiguous ? 'ambiguous' : 'none', r.raw_title, r.raw_isrc);
   }
   return n;
+}
+
+// Likely songs for an unmatched title, best first, from a preloaded [{ id, title, isrc }] list. Only
+// suggestions: nothing here links earnings, a person confirms through the assign action. 0.8 is a first
+// guess at the cut-off (a one-letter slip in a 10-letter title scores 0.9); tune it against real statements.
+export function suggestSongs(songs, rawTitle, { limit = 3, min = 0.8 } = {}) {
+  if (!rawTitle) return [];
+  return songs
+    .map((s) => ({ song_id: s.id, title: s.title, isrc: s.isrc, score: titleSimilarity(rawTitle, s.title) }))
+    .filter((s) => s.score >= min)
+    .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title) || a.song_id - b.song_id)
+    .slice(0, limit);
 }
