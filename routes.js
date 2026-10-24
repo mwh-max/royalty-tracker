@@ -17,8 +17,9 @@ const json = (res, status, body) => {
 };
 
 const readBody = (req) => new Promise((resolve, reject) => {
-  let data = '';
-  req.on('data', (c) => { data += c; if (data.length > 25e6) { reject(new HttpError(413, 'Body too large')); req.destroy(); } });
+  let data = '', bytes = 0;
+  req.setEncoding('utf8'); // decodes across chunk boundaries, so a multibyte character split between chunks survives
+  req.on('data', (c) => { data += c; bytes += Buffer.byteLength(c); if (bytes > 25e6) { reject(new HttpError(413, 'Body too large')); req.destroy(); } });
   req.on('end', () => {
     if (!data) return resolve({});
     try { resolve(JSON.parse(data)); } catch { reject(bad('Invalid JSON')); }
@@ -123,12 +124,12 @@ export function createRoutes(db) {
   route('PUT', '/api/payments/:id', ({ params, body }) => {
     const cur = get('SELECT * FROM payments WHERE id=?', params.id);
     if (!cur) throw notFound('Payment');
-    // only fields present in the body change; an explicit null clears received_*
+    // only fields present in the body change; an explicit null (or "" for notes) clears received_* and notes
     const has = (k) => Object.hasOwn(body, k);
     run('UPDATE payments SET received_micros=?, received_date=?, notes=? WHERE id=?',
       has('received_amount') ? (num(body.received_amount) == null ? null : toMicros(num(body.received_amount))) : cur.received_micros,
       has('received_date') ? str(body.received_date) : cur.received_date,
-      str(body.notes) ?? cur.notes, params.id);
+      has('notes') ? str(body.notes) : cur.notes, params.id);
     return { ok: true };
   });
   route('DELETE', '/api/payments/:id', ({ params }) => { runOne('Payment', 'DELETE FROM payments WHERE id=?', params.id); return { ok: true }; });

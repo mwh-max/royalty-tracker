@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import { createTestApp } from './helpers.js';
 import { parseCsv } from '../parse.js';
 
@@ -343,4 +344,56 @@ test('/api/composition/readiness reports each song and updates as splits change'
 
   const all = (await call('GET', '/api/composition/readiness')).data;
   assert.ok(all.ready >= 1 && all.total >= all.ready);
+});
+
+// ---------- request body decoding ----------
+
+test('a large import keeps a multibyte character that straddles two body chunks intact', async () => {
+  const rows = Array.from({ length: 8000 }, (_, i) => `Café Ñandú ${i} 東京,1.00`).join('\n');
+  const body = Buffer.from(JSON.stringify({ source: 'MultibyteSrc', csv: `Track,Earnings\n${rows}\n` }));
+  // cut the body just after the lead byte of a multibyte character (the next byte is a continuation byte)
+  let cut = body.length >> 1;
+  while ((body[cut] & 0xc0) !== 0x80) cut++;
+
+  const status = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: server.address().port, method: 'POST', path: '/api/statements/import',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': body.length } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+    req.on('error', reject);
+    req.write(body.subarray(0, cut));
+    setTimeout(() => req.end(body.subarray(cut)), 50); // long enough for the server to see two separate chunks
+  });
+  assert.equal(status, 200);
+
+  const titles = (await call('GET', '/api/unmatched')).data.map((u) => u.raw_title).filter((t) => t.startsWith('Café Ñandú '));
+  assert.equal(titles.length, 8000);
+  assert.deepEqual(titles.filter((t) => t.includes('\uFFFD')), [], 'no title was corrupted at the chunk boundary');
+});
+
+// ---------- payment notes ----------
+
+const paymentWithNotes = async (notes) => (await call('POST', '/api/payments', { source: 'NotesSrc', expected_amount: 10, notes })).data.id;
+const notesOf = async (id) => (await call('GET', '/api/payments')).data.find((x) => x.id === id).notes;
+
+test('payment update with notes: null clears the notes', async () => {
+  const id = await paymentWithNotes('chase on Friday');
+  assert.equal((await call('PUT', `/api/payments/${id}`, { notes: null })).status, 200);
+  assert.equal(await notesOf(id), null);
+});
+
+test('payment update with notes: "" clears the notes', async () => {
+  const id = await paymentWithNotes('chase on Friday');
+  assert.equal((await call('PUT', `/api/payments/${id}`, { notes: '' })).status, 200);
+  assert.equal(await notesOf(id), null);
+});
+
+test('payment update without a notes key leaves the notes unchanged', async () => {
+  const id = await paymentWithNotes('chase on Friday');
+  await call('PUT', `/api/payments/${id}`, { received_amount: 10, received_date: '2025-03-01' }); // what "Record received" sends
+  assert.equal(await notesOf(id), 'chase on Friday');
+});
+
+test('payment update with new notes text replaces the notes', async () => {
+  const id = await paymentWithNotes('chase on Friday');
+  await call('PUT', `/api/payments/${id}`, { notes: 'paid by bank transfer' });
+  assert.equal(await notesOf(id), 'paid by bank transfer');
 });
