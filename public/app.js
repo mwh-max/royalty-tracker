@@ -112,7 +112,7 @@ const pages = {
     const mlcPanel = h('div', null,
       h('h2', null, 'MLC bulk match'),
       h('p', { class: 'muted' }, `${mlc.ready} recording${mlc.ready === 1 ? '' : 's'} ready to propose to the MLC (ISRC + MLC Song Code). ` +
-        'Rename the downloaded file to MemberName_BulkMatchSuggestions_YYYYMMDD.csv and send it to the MLC following its current bulk match instructions (https://pages.themlc.com/bulk-match-submission-process). ' +
+        'Rename the downloaded file to MemberName_BulkMatchSuggestions_YYYYMMDD.csv and send it to the MLC following its current bulk match instructions on themlc.com. ' +
         'This app cannot see which of your recordings the MLC has left unmatched.'),
       mlc.ready ? h('a', { href: '/api/export/mlc-bulk-match.csv', download: '' }, 'Download CSV') : null,
       mlc.skipped.length ? h('ul', null, mlc.skipped.map((s) => h('li', null, `${s.title}: ${s.reason}`))) : null);
