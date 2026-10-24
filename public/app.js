@@ -112,8 +112,10 @@ const pages = {
     const mlcPanel = h('div', null,
       h('h2', null, 'MLC bulk match'),
       h('p', { class: 'muted' }, `${mlc.ready} recording${mlc.ready === 1 ? '' : 's'} ready to propose to the MLC (ISRC + MLC Song Code). ` +
-        'Upload the file through the MLC member portal; this app cannot see which of your recordings the MLC has left unmatched.'),
-      mlc.ready ? h('a', { href: '/api/export/mlc-bulk-match.csv', download: 'mlc-bulk-match.csv' }, 'Download CSV') : null,
+        'Rename the downloaded file to MemberName_BulkMatchSuggestions_YYYYMMDD.csv and email it to bulk.matching@themlc.com, following the instructions at https://pages.themlc.com/bulk-match-submission-process. ' +
+        'The MLC currently quotes 30 to 90 days for a response, and that can change. ' +
+        'This app cannot see which of your recordings the MLC has left unmatched and does not submit anything for you.'),
+      mlc.ready ? h('a', { href: '/api/export/mlc-bulk-match.csv', download: '' }, 'Download CSV') : null,
       mlc.skipped.length ? h('ul', null, mlc.skipped.map((s) => h('li', null, `${s.title}: ${s.reason}`))) : null);
     const notReady = ready.songs.filter((s) => s.status !== 'ready');
     const readyPanel = ready.total ? h('div', null,
