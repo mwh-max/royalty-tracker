@@ -280,7 +280,8 @@ test('MLC bulk-match preview and CSV download', async () => {
   const res = await fetch(base + '/api/export/mlc-bulk-match.csv');
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('content-type'), 'text/csv; charset=utf-8');
-  assert.match(res.headers.get('content-disposition'), /filename="mlc-bulk-match\.csv"/);
+  const filename = res.headers.get('content-disposition').match(/filename="([^"]+)"/)?.[1];
+  assert.match(filename, /^BulkMatchSuggestions_\d{8}\.csv$/, 'only the member prefix is left for the user to add');
   const lines = (await res.text()).split('\n');
   assert.equal(lines[0], 'ISRC,MLC Song Code');
   assert.ok(lines.includes('USZZ12800002,M9101'), 'ISRC normalised to 12 characters');

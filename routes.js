@@ -146,7 +146,8 @@ export function createRoutes(db) {
     return { ready: rows.length, skipped };
   });
   route('GET', '/api/export/mlc-bulk-match.csv', () => ({
-    __csv: mlcBulkMatchCsv(mlcBulkMatch(db).rows), __filename: 'mlc-bulk-match.csv', __type: 'text/csv; charset=utf-8',
+    // the MLC wants MemberName_BulkMatchSuggestions_YYYYMMDD.csv; the app can't know the member name, so the user adds it
+    __csv: mlcBulkMatchCsv(mlcBulkMatch(db).rows), __filename: `BulkMatchSuggestions_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.csv`, __type: 'text/csv; charset=utf-8',
   }));
 
   route('GET', '/api/export/earnings.csv', () => {
