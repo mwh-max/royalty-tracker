@@ -149,6 +149,11 @@ export const normIsrc = (s) => {
   return /^[A-Z0-9]{12}$/.test(t) ? t : null;
 };
 
+// ISO 3901 layout of a normalised ISRC: 2 letters (country or agency), 3 letters or digits (registrant),
+// 2 digits (year) and 5 digits (designation). The export's hard gate is still the 12 characters in
+// normIsrc; this only tells the user why the MLC might reject an ISRC that is 12 characters long.
+export const hasIsrcLayout = (isrc) => /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(isrc);
+
 // ---------- title similarity (for suggesting songs; never used to assign automatically) ----------
 
 // Words that mark a different cut of the same song, not a different song.

@@ -1,6 +1,6 @@
 // Read-side domain queries: song stats, dashboard, payouts, advances and payments.
 import { all, get } from './db.js';
-import { usd, normIsrc } from './parse.js';
+import { usd, normIsrc, hasIsrcLayout } from './parse.js';
 
 export function songsWithStats(db) {
   const songs = all(db, `
@@ -176,6 +176,7 @@ export function mlcBulkMatch(db) {
     const isrc = normIsrc(s.isrc);
     if (!s.isrc) skip('Has an MLC Song Code but no ISRC');
     else if (!isrc) skip('ISRC must be 12 letters or digits');
+    else if (!hasIsrcLayout(isrc)) skip('ISRC is 12 characters but does not follow the standard ISRC layout');
     else if (!MLC_CODE.test(code)) skip('MLC Song Code has spaces, commas, quotes or a leading = + - @');
     else usable.push({ song: s, isrc, code });
   }

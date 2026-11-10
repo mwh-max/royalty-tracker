@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseMoney, parseMoneyMicros, microsToString, parseCsv, normPeriod, detectDateOrder, normIsrc, normTitle, titleSimilarity } from '../parse.js';
+import { parseMoney, parseMoneyMicros, microsToString, parseCsv, normPeriod, detectDateOrder, normIsrc, hasIsrcLayout, normTitle, titleSimilarity } from '../parse.js';
 
 test('parseMoney: sub-cent decimals are not read as whole numbers', () => {
   assert.equal(parseMoney('0.00456'), 0.00456);
@@ -100,4 +100,16 @@ test('titleSimilarity: 1 for the same song, high for a typo, low for different s
   assert.ok(titleSimilarity('Midnight Drive', 'Summer Rain') < 0.4);
   assert.equal(titleSimilarity('', 'Anything'), 0);
   assert.equal(titleSimilarity('(Live)', 'Midnight Drive'), 0, 'nothing left after normalising');
+});
+
+test('hasIsrcLayout: 2 letters, 3 letters or digits, 2 digits, 5 digits', () => {
+  assert.equal(hasIsrcLayout('USZZ12600001'), true);
+  assert.equal(hasIsrcLayout('GBAB12400123'), true);
+  assert.equal(hasIsrcLayout('QM9A12400123'), true, 'the registrant part may mix letters and digits');
+  assert.equal(hasIsrcLayout('1SZZ12600001'), false, 'country part must be letters');
+  assert.equal(hasIsrcLayout('USZZ1AB00001'), false, 'year part must be digits');
+  assert.equal(hasIsrcLayout('USZZ1260000A'), false, 'designation part must be digits');
+  assert.equal(hasIsrcLayout('USZZ1260001'), false, 'too short');
+  assert.equal(hasIsrcLayout('USZZ126000012'), false, 'too long');
+  assert.equal(hasIsrcLayout('uszz12600001'), false, 'expects the upper-cased value that normIsrc returns');
 });

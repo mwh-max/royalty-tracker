@@ -249,3 +249,28 @@ test('compositionReadiness: ready only for complete, non-zero composition splits
   assert.equal(r.ready, r.songs.filter((s) => s.status === 'ready').length);
   assert.ok(r.ready >= 2);
 });
+
+test('mlcBulkMatch still exports an ISRC that follows the standard layout', async () => {
+  const { mlcBulkMatch } = await import('../queries.js');
+  const id = Number(app.db.prepare('INSERT INTO songs (title, isrc, mlc_song_code) VALUES (?,?,?)').run('Layout Ok', 'GB-AB1-24-00123', 'M7001').lastInsertRowid);
+  const { rows, skipped } = mlcBulkMatch(app.db);
+  assert.ok(rows.some((r) => r.isrc === 'GBAB12400123' && r.mlc_song_code === 'M7001'));
+  assert.ok(!skipped.some((s) => s.song_id === id));
+});
+
+test('mlcBulkMatch skips a 12 character ISRC with a bad layout and says why, without altering it', async () => {
+  const { mlcBulkMatch } = await import('../queries.js');
+  const insert = app.db.prepare('INSERT INTO songs (title, isrc, mlc_song_code) VALUES (?,?,?)');
+  const bad = { 'Layout Country': '1SZZ12600001', 'Layout Year': 'USZZ1AB00001', 'Layout Designation': 'USZZ1260000A' };
+  const ids = Object.fromEntries(Object.entries(bad).map(([title, isrc], i) => [title, Number(insert.run(title, isrc, `M80${i}`).lastInsertRowid)]));
+  const tooShort = Number(insert.run('Layout Short', 'USZZ126', 'M809').lastInsertRowid);
+
+  const { rows, skipped } = mlcBulkMatch(app.db);
+  const reason = (id) => skipped.find((s) => s.song_id === id)?.reason;
+  for (const [title, id] of Object.entries(ids)) {
+    assert.equal(reason(id), 'ISRC is 12 characters but does not follow the standard ISRC layout', title);
+    assert.ok(!rows.some((r) => r.isrc === bad[title]), `${title} is not exported`);
+    assert.equal(app.db.prepare('SELECT isrc FROM songs WHERE id = ?').get(id).isrc, bad[title], `${title} is left as entered`);
+  }
+  assert.equal(reason(tooShort), 'ISRC must be 12 letters or digits', 'the 12 character gate and its message are unchanged');
+});
